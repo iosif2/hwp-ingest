@@ -1,12 +1,13 @@
 [package]
-name = "hwp-ingest"
+name = "hwp-ingest-rhwp-adapter"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [lib]
-name = "hwp_ingest"
+name = "hwp_ingest_rhwp_adapter"
 path = "src/lib.rs"
 
 [dependencies]
-hwp-ingest-rhwp-adapter.workspace = true
+rhwp.workspace = true

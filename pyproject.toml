@@ -1,0 +1,32 @@
+[build-system]
+requires = ["maturin>=1.11,<2"]
+build-backend = "maturin"
+
+[project]
+name = "hwp-ingest"
+version = "0.1.0"
+description = "Python bindings for native rhwp HWP to PDF conversion"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Rust",
+    "Typing :: Typed",
+]
+
+[dependency-groups]
+dev = [
+    "maturin>=1.11,<2",
+    "pytest>=8,<9",
+]
+
+[tool.maturin]
+manifest-path = "crates/hwp-ingest-python/Cargo.toml"
+python-source = "python"
+module-name = "hwp_ingest._native"
+bindings = "pyo3"
+strip = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]

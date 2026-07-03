@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/hwp-ingest",
+    "crates/hwp-ingest-rhwp-adapter",
     "crates/hwp-ingest-python",
 ]
 resolver = "2"
@@ -12,5 +13,6 @@ license = "MIT"
 
 [workspace.dependencies]
 hwp-ingest = { path = "crates/hwp-ingest" }
+hwp-ingest-rhwp-adapter = { path = "crates/hwp-ingest-rhwp-adapter" }
 pyo3 = { version = "0.29.0", features = ["abi3-py310"] }
-rhwp = { git = "https://github.com/edwardkim/rhwp", tag = "v0.7.17", default-features = false }
+rhwp = { path = "vendor/rhwp-subset", default-features = false }
