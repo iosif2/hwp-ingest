@@ -1,0 +1,10 @@
+hwp-ingest includes a vendored subset of rhwp.
+
+rhwp
+Origin: https://github.com/edwardkim/rhwp
+Imported commit: 03351190ec35436e58cbfee0aa9278a8fdc04a59
+Imported tag: v0.7.17
+License: MIT
+Copyright: Copyright (c) 2025-2026 Edward Kim
+
+The upstream-derived code is stored under vendor/rhwp-subset. hwp-ingest adapter and binding code remains outside that tree.
