@@ -74,6 +74,7 @@ impl From<RhwpAdapterError> for HwpIngestError {
         match error {
             RhwpAdapterError::Parse(message) => Self::Parse(message),
             RhwpAdapterError::Render(message) => Self::Render(message),
+            RhwpAdapterError::PdfBackendUnavailable(message) => Self::Render(message),
             RhwpAdapterError::EmptyDocument => Self::EmptyDocument,
             RhwpAdapterError::PageOutOfRange {
                 requested,

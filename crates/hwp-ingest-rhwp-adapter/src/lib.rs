@@ -1,5 +1,6 @@
 pub mod layout;
 pub mod parse;
+pub(crate) mod pdf_backend;
 pub mod render;
 
 pub use layout::DocumentLayoutInfo;
@@ -13,6 +14,7 @@ use std::fmt;
 pub enum RhwpAdapterError {
     Parse(String),
     Render(String),
+    PdfBackendUnavailable(String),
     EmptyDocument,
     PageOutOfRange { requested: u32, page_count: u32 },
 }
@@ -22,6 +24,7 @@ impl fmt::Display for RhwpAdapterError {
         match self {
             Self::Parse(message) => write!(f, "failed to parse HWP document: {message}"),
             Self::Render(message) => write!(f, "failed to render PDF: {message}"),
+            Self::PdfBackendUnavailable(message) => write!(f, "{message}"),
             Self::EmptyDocument => write!(f, "HWP document contains no pages"),
             Self::PageOutOfRange {
                 requested,

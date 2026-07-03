@@ -1,4 +1,4 @@
-use crate::{RhwpAdapterError, parse_hwp_bytes};
+use crate::{RhwpAdapterError, parse_hwp_bytes, pdf_backend};
 
 pub fn hwp_to_pdf_bytes(data: &[u8], page_index: Option<u32>) -> Result<Vec<u8>, RhwpAdapterError> {
     let document = parse_hwp_bytes(data)?;
@@ -15,15 +15,22 @@ pub fn hwp_to_pdf_bytes(data: &[u8], page_index: Option<u32>) -> Result<Vec<u8>,
                 page_count,
             });
         }
-
-        return document
-            .inner
-            .render_pages_pdf_native(&[page])
-            .map_err(|error| RhwpAdapterError::Render(error.to_string()));
     }
 
-    document
-        .inner
-        .render_document_pdf_native()
-        .map_err(|error| RhwpAdapterError::Render(error.to_string()))
+    let pages: Vec<u32> = match page_index {
+        Some(page) => vec![page],
+        None => (0..page_count).collect(),
+    };
+
+    let mut svg_pages = Vec::with_capacity(pages.len());
+    for page in pages {
+        svg_pages.push(
+            document
+                .inner
+                .render_page_svg_native(page)
+                .map_err(|error| RhwpAdapterError::Render(error.to_string()))?,
+        );
+    }
+
+    pdf_backend::svgs_to_pdf(&svg_pages)
 }
