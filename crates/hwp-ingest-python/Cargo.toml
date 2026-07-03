@@ -1,0 +1,15 @@
+[package]
+name = "hwp-ingest-python"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "hwp_ingest_python"
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+hwp-ingest.workspace = true
+pyo3.workspace = true
