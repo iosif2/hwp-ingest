@@ -111,6 +111,61 @@ mod tests {
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture.display()))
     }
 
+    fn tac_behindtext_flow_fixture_bytes() -> Vec<u8> {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("adapter crate should live under workspace crates directory")
+            .join("tests/fixtures/tac-behindtext-table-flow.hwp");
+        std::fs::read(&fixture)
+            .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture.display()))
+    }
+
+    fn svg_attr_f64(element: &str, attr: &str) -> f64 {
+        let needle = format!(r#"{attr}=""#);
+        let start = element
+            .find(&needle)
+            .unwrap_or_else(|| panic!("{attr} missing from SVG element: {element}"))
+            + needle.len();
+        let end = element[start..]
+            .find('"')
+            .unwrap_or_else(|| panic!("{attr} value not closed in SVG element: {element}"))
+            + start;
+        element[start..end]
+            .parse()
+            .unwrap_or_else(|_| panic!("{attr} should be numeric in SVG element: {element}"))
+    }
+
+    fn first_svg_text_y(svg: &str, text: &str) -> f64 {
+        let needle = format!(">{text}</text>");
+        let text_end = svg
+            .find(&needle)
+            .unwrap_or_else(|| panic!("SVG text {text:?} missing"));
+        let text_start = svg[..text_end]
+            .rfind("<text")
+            .unwrap_or_else(|| panic!("SVG text {text:?} has no opening text element"));
+        svg_attr_f64(&svg[text_start..text_end], "y")
+    }
+
+    fn tac_behindtext_fixture_table_bottom_y(svg: &str) -> f64 {
+        let table_left = r#"x1="75.58666666666667""#;
+        let table_right = r#"x2="701.5066666666667""#;
+        let bottom = svg
+            .match_indices("<line")
+            .filter_map(|(start, _)| {
+                let end = svg[start..].find('>')? + start + 1;
+                let line = &svg[start..end];
+                (line.contains(table_left) && line.contains(table_right))
+                    .then(|| svg_attr_f64(line, "y1"))
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(
+            bottom.is_finite(),
+            "TAC BehindText table border line missing"
+        );
+        bottom
+    }
+
     #[test]
     fn hwp_to_svg_pages_uses_hancom_render_compatibility() {
         let bytes = synthetic_non_overlay_paper_table_hwp_bytes();
@@ -165,6 +220,27 @@ mod tests {
             adapter_pages[0].svg.contains(r#"y1="210.96""#),
             "adapter output should stack the non-TAC table after the preceding TAC table"
         );
+    }
+
+    #[test]
+    fn hwp_to_svg_pages_reserves_flow_for_tac_behindtext_fixture() {
+        let bytes = tac_behindtext_flow_fixture_bytes();
+        let adapter_pages =
+            hwp_to_svg_pages(&bytes, Some(0)).expect("adapter SVG render should succeed");
+        assert_eq!(adapter_pages.len(), 1);
+        assert_eq!(adapter_pages[0].page_index, 0);
+
+        let svg = &adapter_pages[0].svg;
+        let table_bottom_y = tac_behindtext_fixture_table_bottom_y(svg);
+        let heading_y = first_svg_text_y(svg, "○");
+
+        assert!(
+            heading_y > table_bottom_y + 1.0,
+            "following body heading should render below the TAC BehindText table; \
+             heading_y={heading_y}, table_bottom_y={table_bottom_y}"
+        );
+        assert!(svg.contains(">현</text>"));
+        assert!(svg.contains(">황</text>"));
     }
 
     #[test]

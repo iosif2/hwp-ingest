@@ -9512,11 +9512,12 @@ impl TypesetEngine {
                     let oversized_multirow = table.row_count > 1
                         && table_measured_h > st.base_available_height()
                         && !paper_anchored_overlay_table;
-                    if matches!(
-                        table.common.text_wrap,
-                        crate::model::shape::TextWrap::InFrontOfText
-                            | crate::model::shape::TextWrap::BehindText
-                    ) && st.col_count == 1
+                    if !table.common.treat_as_char
+                        && matches!(
+                            table.common.text_wrap,
+                            crate::model::shape::TextWrap::InFrontOfText
+                                | crate::model::shape::TextWrap::BehindText
+                        )
                         && !oversized_multirow
                     {
                         st.current_items.push(PageItem::Shape {
@@ -12233,6 +12234,124 @@ mod tests {
             1,
             "[BUG #703] typeset 도 1 페이지여야 함. 결함 시 BehindText 표 height ≈800 px 가 \
              cur_h 에 가산되어 후속 paragraph 가 다음 페이지로 밀림 (RED)",
+        );
+    }
+
+    #[test]
+    fn test_typeset_tac_behind_text_table_reserves_flow() {
+        use crate::model::control::Control;
+        use crate::model::shape::{TextWrap, VertRelTo};
+        use crate::model::table::{Cell, Table};
+
+        let engine = TypesetEngine::with_default_dpi();
+        let paginator = Paginator::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let composed: Vec<ComposedParagraph> = Vec::new();
+
+        let mut table = Table {
+            row_count: 2,
+            col_count: 6,
+            cells: vec![Cell {
+                col: 0,
+                row: 0,
+                col_span: 1,
+                row_span: 1,
+                width: 7824,
+                height: 2805,
+                paragraphs: vec![Paragraph::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        table.common.treat_as_char = true;
+        table.common.text_wrap = TextWrap::BehindText;
+        table.common.vert_rel_to = VertRelTo::Para;
+        table.common.width = 46944;
+        table.common.height = 5611;
+
+        let table_para = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 3600,
+                line_height: 5891,
+                text_height: 5891,
+                line_spacing: 1600,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            }],
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+        let following_para = Paragraph {
+            text: "○ 현황".to_string(),
+            line_segs: vec![LineSeg {
+                vertical_pos: 11091,
+                line_height: 1400,
+                text_height: 1400,
+                line_spacing: 1332,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let paras = vec![table_para, following_para];
+
+        let (_paginator_result, measured) =
+            paginator.paginate(&paras, &composed, &styles, &page_def, &col_def, 0);
+        let typeset_result = engine.typeset_section(
+            &paras,
+            &composed,
+            &styles,
+            &page_def,
+            &col_def,
+            0,
+            &measured.tables,
+            false,
+            &std::collections::HashSet::new(),
+        );
+        let items: Vec<_> = typeset_result
+            .pages
+            .iter()
+            .flat_map(|page| page.column_contents.iter())
+            .flat_map(|col| col.items.iter())
+            .collect();
+
+        assert!(items.iter().any(|item| matches!(
+            item,
+            PageItem::Table {
+                para_index: 0,
+                control_index: 0
+            }
+        )));
+        assert!(!items.iter().any(|item| matches!(
+            item,
+            PageItem::Shape {
+                para_index: 0,
+                control_index: 0
+            }
+        )));
+        let table_pos = items
+            .iter()
+            .position(|item| {
+                matches!(
+                    item,
+                    PageItem::Table {
+                        para_index: 0,
+                        control_index: 0
+                    }
+                )
+            })
+            .expect("TAC BehindText table should stay in flow");
+        let following_pos = items
+            .iter()
+            .position(|item| matches!(item, PageItem::FullParagraph { para_index: 1 }))
+            .expect("following text paragraph should be paginated");
+        assert!(
+            table_pos < following_pos,
+            "following paragraph must paginate after the TAC BehindText table"
         );
     }
 }

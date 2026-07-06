@@ -1541,12 +1541,14 @@ impl Paginator {
         for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
             match ctrl {
                 Control::Table(table) => {
-                    // 글앞으로 / 글뒤로: Shape처럼 취급 — 공간 차지 없음
-                    if matches!(
-                        table.common.text_wrap,
-                        crate::model::shape::TextWrap::InFrontOfText
-                            | crate::model::shape::TextWrap::BehindText
-                    ) {
+                    // 비-TAC 글앞으로 / 글뒤로: Shape처럼 취급 — 공간 차지 없음
+                    if !table.common.treat_as_char
+                        && matches!(
+                            table.common.text_wrap,
+                            crate::model::shape::TextWrap::InFrontOfText
+                                | crate::model::shape::TextWrap::BehindText
+                        )
+                    {
                         st.current_items.push(PageItem::Shape {
                             para_index: para_idx,
                             control_index: ctrl_idx,
@@ -2091,15 +2093,16 @@ impl Paginator {
 
             // 강제 줄넘김 후 TAC 표: 텍스트가 표 앞에 있음 (Task #19)
             let has_forced_linebreak = is_tac_table && para.text.contains('\n');
-            let pre_table_end_line = if vertical_offset > 0 && !para.text.is_empty() {
-                total_lines
-            } else if has_forced_linebreak && total_lines > 1 {
-                // 강제 줄넘김 전 텍스트 줄 수 = \n 개수
-                let newline_count = para.text.chars().filter(|&c| c == '\n').count();
-                newline_count.min(total_lines - 1)
-            } else {
-                0
-            };
+            let pre_table_end_line =
+                if !is_tac_table && vertical_offset > 0 && !para.text.is_empty() {
+                    total_lines
+                } else if has_forced_linebreak && total_lines > 1 {
+                    // 강제 줄넘김 전 텍스트 줄 수 = \n 개수
+                    let newline_count = para.text.chars().filter(|&c| c == '\n').count();
+                    newline_count.min(total_lines - 1)
+                } else {
+                    0
+                };
 
             // 표 앞 텍스트 배치 (첫 번째 표에서만, 중복 방지)
             // 어울림 표는 wrap 영역에서 텍스트 처리하므로 건너뜀

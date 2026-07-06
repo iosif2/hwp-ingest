@@ -2,6 +2,22 @@
 
 This file records hwp-ingest-local changes applied after the recorded upstream import because vendor/rhwp-subset is a surgical source subset and does not carry upstream git history. Keep one reverse-chronological entry per hwp-ingest commit that changes upstream-derived source files.
 
+## 2026-07-07 — TAC BehindText table flow reservation
+
+Status: hwp-ingest-local renderer compatibility fix; upstream contribution candidate.
+
+Scope: vendor/rhwp-subset pagination/typeset/layout table classification and regression coverage, plus adapter fixture coverage for the public SVG/PDF path; product adapter/core/Python policy remains outside the vendored tree.
+
+Problem: Treat-as-char tables saved with BehindText wrapping were classified as non-flowing Shape items before TAC handling in both pagination and typeset paths, and table layout also treated behind/front wrapping as no-advance regardless of TAC, so following body text rendered over the table.
+
+Root cause: The BehindText/InFrontOfText table branches in Paginator::process_controls and TypesetEngine table placement ran before checking table.common.treat_as_char, and LayoutEngine::layout_table returned y_start for behind/front tables without excluding TAC tables.
+
+Behavior: Non-TAC behind/front tables still render as overlay shapes with no flow advance, while TAC behind/front tables continue through table pagination/typesetting/layout and reserve flow space when non-inline.
+
+Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/renderer/pagination/engine.rs`, `src/renderer/typeset.rs`, `src/renderer/layout/table_layout.rs`, `src/renderer/pagination/tests.rs`, `src/renderer/layout/tests.rs`, `crates/hwp-ingest-rhwp-adapter/src/render.rs`, `tests/fixtures/tac-behindtext-table-flow.hwp`, and `tests/fixtures/README.md`.
+
+Upstream sync: Remove this local patch only when upstream rhwp treats TAC tables as flow-reserving before applying behind/front overlay classification and layout no-advance rules.
+
 ## 2026-07-06 — vendor-local Hancom render compatibility shim
 
 Status: hwp-ingest-local compatibility shim; upstream contribution candidate.

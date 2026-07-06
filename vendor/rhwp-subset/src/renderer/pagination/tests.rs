@@ -88,6 +88,214 @@ fn test_paginator_dpi() {
     assert!((paginator.dpi - 72.0).abs() < 0.01);
 }
 
+fn behindtext_table_paragraph(treat_as_char: bool) -> Paragraph {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+    use crate::model::table::{Cell, Table};
+
+    let mut common = CommonObjAttr::default();
+    common.treat_as_char = treat_as_char;
+    common.text_wrap = TextWrap::BehindText;
+    common.vert_rel_to = VertRelTo::Para;
+    common.width = 46944;
+    common.height = 5611;
+
+    Paragraph {
+        controls: vec![Control::Table(Box::new(Table {
+            row_count: 1,
+            col_count: 1,
+            row_sizes: vec![1],
+            common,
+            cells: vec![Cell {
+                row: 0,
+                col: 0,
+                row_span: 1,
+                col_span: 1,
+                width: 46944,
+                height: 5611,
+                paragraphs: vec![Paragraph::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }))],
+        line_segs: vec![LineSeg {
+            line_height: 5891,
+            text_height: 5891,
+            line_spacing: 1600,
+            segment_width: 48188,
+            tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+fn following_text_paragraph() -> Paragraph {
+    Paragraph {
+        text: "NEXT".to_string(),
+        line_segs: vec![LineSeg {
+            line_height: 5891,
+            text_height: 5891,
+            line_spacing: 1600,
+            segment_width: 48188,
+            tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_tac_behindtext_table_paginated_as_table_not_shape() {
+    let paginator = Paginator::with_default_dpi();
+    let styles = ResolvedStyleSet::default();
+    let paras = vec![behindtext_table_paragraph(true), following_text_paragraph()];
+    let composed: Vec<ComposedParagraph> = Vec::new();
+    let (result, _measured) = paginator.paginate(
+        &paras,
+        &composed,
+        &styles,
+        &a4_page_def(),
+        &ColumnDef::default(),
+        0,
+    );
+
+    let items: Vec<_> = result
+        .pages
+        .iter()
+        .flat_map(|page| page.column_contents.iter())
+        .flat_map(|col| col.items.iter())
+        .collect();
+
+    assert!(items.iter().any(|item| matches!(
+        item,
+        PageItem::Table {
+            para_index: 0,
+            control_index: 0
+        }
+    )));
+    assert!(!items.iter().any(|item| matches!(
+        item,
+        PageItem::Shape {
+            para_index: 0,
+            control_index: 0
+        }
+    )));
+}
+
+#[test]
+fn test_non_tac_behindtext_table_remains_shape() {
+    let paginator = Paginator::with_default_dpi();
+    let styles = ResolvedStyleSet::default();
+    let paras = vec![
+        behindtext_table_paragraph(false),
+        following_text_paragraph(),
+    ];
+    let composed: Vec<ComposedParagraph> = Vec::new();
+    let (result, _measured) = paginator.paginate(
+        &paras,
+        &composed,
+        &styles,
+        &a4_page_def(),
+        &ColumnDef::default(),
+        0,
+    );
+
+    let items: Vec<_> = result
+        .pages
+        .iter()
+        .flat_map(|page| page.column_contents.iter())
+        .flat_map(|col| col.items.iter())
+        .collect();
+
+    assert!(items.iter().any(|item| matches!(
+        item,
+        PageItem::Shape {
+            para_index: 0,
+            control_index: 0
+        }
+    )));
+}
+
+fn text_after_tac_behindtext_table_paragraph() -> Paragraph {
+    use crate::model::control::Control;
+
+    let mut para = behindtext_table_paragraph(true);
+    para.text = "NEXT".to_string();
+    if let Some(Control::Table(table)) = para.controls.get_mut(0) {
+        table.common.vertical_offset = 1200;
+    }
+    para.line_segs = vec![
+        LineSeg {
+            line_height: 5891,
+            text_height: 5891,
+            line_spacing: 1600,
+            segment_width: 48188,
+            tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+            ..Default::default()
+        },
+        LineSeg {
+            vertical_pos: 7491,
+            line_height: 5891,
+            text_height: 5891,
+            line_spacing: 1600,
+            segment_width: 48188,
+            tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+            ..Default::default()
+        },
+    ];
+    para
+}
+
+#[test]
+fn test_tac_behindtext_vertical_offset_text_stays_after_table() {
+    let paginator = Paginator::with_default_dpi();
+    let styles = ResolvedStyleSet::default();
+    let paras = vec![text_after_tac_behindtext_table_paragraph()];
+    let composed: Vec<ComposedParagraph> = Vec::new();
+    let (result, _measured) = paginator.paginate(
+        &paras,
+        &composed,
+        &styles,
+        &a4_page_def(),
+        &ColumnDef::default(),
+        0,
+    );
+
+    let items: Vec<_> = result
+        .pages
+        .iter()
+        .flat_map(|page| page.column_contents.iter())
+        .flat_map(|col| col.items.iter())
+        .collect();
+    let table_pos = items
+        .iter()
+        .position(|item| {
+            matches!(
+                item,
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 0
+                }
+            )
+        })
+        .expect("TAC BehindText table should paginate as a table");
+
+    assert!(
+        !items[..table_pos]
+            .iter()
+            .any(|item| matches!(item, PageItem::PartialParagraph { para_index: 0, .. })),
+        "TAC BehindText vertical offsets must not force host text before the table"
+    );
+    assert!(items[table_pos + 1..].iter().any(|item| matches!(
+        item,
+        PageItem::PartialParagraph {
+            para_index: 0,
+            start_line: 1,
+            end_line: 2
+        }
+    )));
+}
 #[test]
 fn test_table_page_split() {
     // 표가 페이지를 초과할 때 PartialTable로 분할되는지 테스트

@@ -29,6 +29,8 @@ Other repository samples, web extension packages, studio apps, generated PDFs, a
 
 The initial import preserved upstream source files without modification. Follow-up hwp-ingest-local source patches are tracked in `LOCAL_CHANGES.md`. hwp-ingest adapter, PyO3 binding, and Python facade code live outside `vendor/rhwp-subset`.
 
+Current hwp-ingest-local parser/layout/render compatibility patches are recorded in LOCAL_CHANGES.md and must be reviewed during upstream sync.
+
 ## Sync rule
 
 The first vendor import preserves the imported upstream subset without source modification. Follow-up changes that prune or adapt upstream-derived code must be separate commits. Whenever parser/layout/render files are locally patched, update both this file and `LOCAL_CHANGES.md` in the same commit. Upstream sync starts by diffing from the recorded base commit, then ports parser/layout/render changes, reruns fixture regression checks, and updates this metadata plus license notices.

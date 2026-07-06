@@ -968,12 +968,14 @@ impl LayoutEngine {
                         0.0
                     }
             };
-            if matches!(
-                table_text_wrap,
-                crate::model::shape::TextWrap::BehindText
-                    | crate::model::shape::TextWrap::InFrontOfText
-            ) {
-                // 글뒤로/글앞으로: y_offset 변경 없음
+            if !table.common.treat_as_char
+                && matches!(
+                    table_text_wrap,
+                    crate::model::shape::TextWrap::BehindText
+                        | crate::model::shape::TextWrap::InFrontOfText
+                )
+            {
+                // 비-TAC 글뒤로/글앞으로: y_offset 변경 없음
                 y_start
             } else if matches!(table_text_wrap, crate::model::shape::TextWrap::TopAndBottom)
                 && !table.common.treat_as_char
