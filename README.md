@@ -9,24 +9,28 @@
 
 <p align="center">
   <strong>Rust-backed Python package for Korean HWP/HWPX ingestion.</strong><br>
-  Current public alpha: HWP to PDF conversion and page-level SVG artifacts through a small typed Python facade.
+  Convert HWP documents to PDF or page-level SVG artifacts through a typed Python facade.
 </p>
 
-## Current alpha scope
+> `hwp-ingest` uses a vendored `rhwp` subset as its current HWP parsing,
+> layout, and rendering backend. The vendored backend can carry hwp-ingest-local
+> compatibility patches, while product-facing conversion policy stays in the
+> hwp-ingest Rust/Python layers.
 
-`0.1.0a2` is a public alpha for HWP to PDF conversion and page-level SVG
-artifact output. Install it with an exact pre-release pin:
+## Features
+
+- Convert HWP files to PDF bytes or PDF files.
+- Render page-level SVG artifacts for inspection and downstream pipelines.
+- Read basic document metadata such as renderable page count.
+- Keep conversion orchestration in Rust while Python handles paths, overwrite policy, and typed facade ergonomics.
+
+Install from PyPI:
 
 ```sh
-uv pip install hwp-ingest==0.1.0a2
+uv pip install hwp-ingest
 # or
-python -m pip install hwp-ingest==0.1.0a2
+python -m pip install hwp-ingest
 ```
-
-Release CI is configured to build Linux x86_64/aarch64, macOS Intel/Apple
-Silicon, and Windows x86_64 wheels. Native runner wheel jobs install
-`rsvg-convert` and run a PDF conversion smoke test; the Linux aarch64 job
-cross-builds the wheel and verifies the artifact payload before publishing.
 
 ## Runtime PDF dependency
 
@@ -73,35 +77,21 @@ when the owning document font is installed, or when the project adds a
 source-backed codepoint mapping for that specific symbol set.
 
 The current renderer preserves the document font name first, then appends
-Korean-compatible fallback families. For Batang/Myeongjo/serif text the fallback
-chain is:
+Korean-compatible fallback families:
 
-```text
-document font → Batang/바탕 → Nanum Myeongjo → AppleMyungjo →
-Noto Serif KR / Noto Serif CJK KR →
-HCR Batang Ext-B / 함초롬바탕 확장B →
-HCR Batang Ext / 함초롬바탕 확장 →
-HCR Batang / 함초롬바탕 →
-Source Han Serif K Old Hangul → serif
-```
-
-For Dotum/Gothic/Gulim/sans-serif text the fallback chain is:
-
-```text
-document font → Malgun Gothic/맑은 고딕 → Apple SD Gothic Neo →
-Noto Sans KR ExtraLight → Noto Sans KR → Pretendard →
-HCR Batang Ext-B / 함초롬바탕 확장B →
-HCR Batang Ext / 함초롬바탕 확장 →
-HCR Batang / 함초롬바탕 →
-Source Han Serif K Old Hangul → sans-serif
-```
+| Text family in the document | Fallback order |
+| --- | --- |
+| Batang/Myeongjo/serif text | Document font → `Batang`/`바탕` → `Nanum Myeongjo` → `AppleMyungjo` → `Noto Serif KR` / `Noto Serif CJK KR` → `HCR Batang Ext-B` / `함초롬바탕 확장B` → `HCR Batang Ext` / `함초롬바탕 확장` → `HCR Batang` / `함초롬바탕` → `Source Han Serif K Old Hangul` → `serif` |
+| Dotum/Gothic/Gulim/sans-serif text | Document font → `Malgun Gothic` / `맑은 고딕` → `Apple SD Gothic Neo` → `Noto Sans KR ExtraLight` → `Noto Sans KR` → `Pretendard` → `HCR Batang Ext-B` / `함초롬바탕 확장B` → `HCR Batang Ext` / `함초롬바탕 확장` → `HCR Batang` / `함초롬바탕` → `Source Han Serif K Old Hangul` → `sans-serif` |
 
 For Hancom-origin documents with PUA symbols, install the matching licensed font
-on the machine running conversion. The common families to check first are
-`HCR Batang`/`함초롬바탕` and `HCR Dotum`/`함초롬돋움`; Windows-origin documents
-may also need `Batang`, `Dotum`, `Gulim`, `Gungsuh`, or `Malgun Gothic`. Some
-older HWP documents reference HY/Hanyang fonts such as `HY울릉도L`,
-`HY헤드라인M`, `HY견고딕`, `HY그래픽`, `HY견명조`, or `HY신명조`.
+on the machine running conversion:
+
+| Document/font origin | Families to check first |
+| --- | --- |
+| Hancom/HCR body or PUA symbols | `HCR Batang` / `함초롬바탕`, `HCR Dotum` / `함초롬돋움` |
+| Windows-origin documents | `Batang`, `Dotum`, `Gulim`, `Gungsuh`, `Malgun Gothic` |
+| Older HY/Hanyang documents | `HY울릉도L`, `HY헤드라인M`, `HY견고딕`, `HY그래픽`, `HY견명조`, `HY신명조` |
 
 Linux/fontconfig check:
 
