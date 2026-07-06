@@ -51,6 +51,26 @@ def to_pdf_bytes(data: bytes, *, page_index: int | None = None) -> bytes:
     return _native.hwp_to_pdf_bytes(data, _validate_page_index(page_index))
 
 
+def to_svg_pages(data: bytes, *, page_index: int | None = None) -> list[bytes]:
+    """HWP 문서 페이지를 SVG bytes 목록으로 렌더링합니다.
+
+    SVG는 페이지 단위 rendered artifact입니다. PDF backend나
+    `rsvg-convert` 실행 파일 없이 생성됩니다.
+
+    Args:
+        data: 전체 HWP 문서 bytes.
+        page_index: 렌더링할 zero-based 페이지 번호입니다. `None`이면 전체 문서를 렌더링합니다.
+
+    Returns:
+        선택된 페이지 순서의 SVG bytes 목록입니다.
+
+    Raises:
+        ValueError: `page_index`가 음수이거나 문서 범위를 벗어날 때 발생합니다.
+        HwpIngestError: 파싱 또는 렌더링이 실패할 때 발생합니다.
+    """
+    return _native.hwp_to_svg_pages(data, _validate_page_index(page_index))
+
+
 def to_pdf_file(
     input_path: str | PathLike[str],
     output_path: str | PathLike[str] | None = None,
@@ -92,3 +112,42 @@ def to_pdf_file(
         _validate_page_index(page_index),
     )
     return Path(report.output_path)
+
+
+def to_svg_files(
+    input_path: str | PathLike[str],
+    output_dir: str | PathLike[str] | None = None,
+    *,
+    page_index: int | None = None,
+    overwrite: bool = False,
+) -> list[Path]:
+    """HWP 문서 페이지를 SVG 파일로 렌더링하고 생성 경로를 반환합니다.
+
+    `output_dir`가 생략되면 입력 파일의 parent directory에 씁니다.
+    파일명은 `<stem>.page-0001.svg` 형식이며, Rust core가 페이지별
+    파일명 계획과 overwrite 충돌 검사를 소유합니다.
+
+    Args:
+        input_path: 입력 HWP 파일 경로입니다.
+        output_dir: SVG 파일을 쓸 디렉터리입니다. `None`이면 입력 파일의 parent directory를 사용합니다.
+        page_index: 렌더링할 zero-based 페이지 번호입니다. `None`이면 전체 문서를 렌더링합니다.
+        overwrite: 기존 SVG 파일을 대체할지 여부입니다.
+
+    Returns:
+        선택된 페이지 순서의 생성 SVG 파일 경로 목록입니다.
+
+    Raises:
+        FileExistsError: 생성될 SVG 파일이 이미 있고 `overwrite`가 `False`일 때 발생합니다.
+        FileNotFoundError: 입력 파일이 없을 때 발생합니다.
+        ValueError: `page_index`가 음수이거나 문서 범위를 벗어날 때 발생합니다.
+        HwpIngestError: 파일 I/O, 파싱, 렌더링, 또는 출력 쓰기가 실패할 때 발생합니다.
+    """
+    input_file = Path(input_path)
+    output_directory = Path(output_dir) if output_dir is not None else None
+    paths = _native.hwp_to_svg_files(
+        str(input_file),
+        str(output_directory) if output_directory is not None else None,
+        _validate_page_index(page_index),
+        overwrite,
+    )
+    return [Path(path) for path in paths]

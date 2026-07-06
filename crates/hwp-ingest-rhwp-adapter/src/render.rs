@@ -1,6 +1,15 @@
 use crate::{RhwpAdapterError, parse_hwp_bytes, pdf_backend};
 
-pub fn hwp_to_pdf_bytes(data: &[u8], page_index: Option<u32>) -> Result<Vec<u8>, RhwpAdapterError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SvgPage {
+    pub page_index: u32,
+    pub svg: String,
+}
+
+pub fn hwp_to_svg_pages(
+    data: &[u8],
+    page_index: Option<u32>,
+) -> Result<Vec<SvgPage>, RhwpAdapterError> {
     let document = parse_hwp_bytes(data)?;
     let page_count = document.inner.page_count();
 
@@ -24,13 +33,21 @@ pub fn hwp_to_pdf_bytes(data: &[u8], page_index: Option<u32>) -> Result<Vec<u8>,
 
     let mut svg_pages = Vec::with_capacity(pages.len());
     for page in pages {
-        svg_pages.push(
-            document
-                .inner
-                .render_page_svg_native(page)
-                .map_err(|error| RhwpAdapterError::Render(error.to_string()))?,
-        );
+        let svg = document
+            .inner
+            .render_page_svg_native(page)
+            .map_err(|error| RhwpAdapterError::Render(error.to_string()))?;
+        svg_pages.push(SvgPage {
+            page_index: page,
+            svg,
+        });
     }
 
-    pdf_backend::svgs_to_pdf(&svg_pages)
+    Ok(svg_pages)
+}
+
+pub fn hwp_to_pdf_bytes(data: &[u8], page_index: Option<u32>) -> Result<Vec<u8>, RhwpAdapterError> {
+    let svg_pages = hwp_to_svg_pages(data, page_index)?;
+    let svg_documents: Vec<String> = svg_pages.into_iter().map(|page| page.svg).collect();
+    pdf_backend::svgs_to_pdf(&svg_documents)
 }

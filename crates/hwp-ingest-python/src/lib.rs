@@ -1,10 +1,11 @@
 use std::io::ErrorKind;
+use std::path::Path;
 
 use hwp_ingest::{self as core, ConvertOptions, HwpIngestError as CoreError};
 use pyo3::create_exception;
-use pyo3::exceptions::{PyFileNotFoundError, PyValueError};
+use pyo3::exceptions::{PyFileExistsError, PyFileNotFoundError, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBytes, PyModule};
+use pyo3::types::{PyBytes, PyList, PyModule};
 
 create_exception!(hwp_ingest, HwpIngestError, pyo3::exceptions::PyException);
 
@@ -37,6 +38,9 @@ fn core_error_to_py(error: CoreError) -> PyErr {
         CoreError::Io { source, .. } if source.kind() == ErrorKind::NotFound => {
             PyFileNotFoundError::new_err(error.to_string())
         }
+        CoreError::Io { source, .. } if source.kind() == ErrorKind::AlreadyExists => {
+            PyFileExistsError::new_err(error.to_string())
+        }
         CoreError::PageOutOfRange { .. } | CoreError::EmptyDocument => {
             PyValueError::new_err(error.to_string())
         }
@@ -67,6 +71,21 @@ fn hwp_to_pdf_bytes(py: Python<'_>, data: &[u8], page_index: Option<u32>) -> PyR
     Ok(PyBytes::new(py, &pdf).unbind())
 }
 
+/// Render HWP bytes to SVG page bytes.
+#[pyfunction]
+#[pyo3(signature = (data, page_index=None))]
+fn hwp_to_svg_pages(py: Python<'_>, data: &[u8], page_index: Option<u32>) -> PyResult<Py<PyList>> {
+    let pages =
+        core::hwp_to_svg_pages(data, convert_options(page_index)).map_err(core_error_to_py)?;
+    let list = PyList::empty(py);
+
+    for page in pages {
+        list.append(PyBytes::new(py, &page.svg))?;
+    }
+
+    Ok(list.unbind())
+}
+
 /// Convert an HWP file to a PDF file and return a conversion report.
 #[pyfunction]
 #[pyo3(signature = (input_path, output_path, page_index=None))]
@@ -86,6 +105,30 @@ fn hwp_to_pdf_file(
     })
 }
 
+/// Render an HWP file to SVG files and return created paths.
+#[pyfunction]
+#[pyo3(signature = (input_path, output_dir=None, page_index=None, overwrite=false))]
+fn hwp_to_svg_files(
+    input_path: &str,
+    output_dir: Option<&str>,
+    page_index: Option<u32>,
+    overwrite: bool,
+) -> PyResult<Vec<String>> {
+    let output_dir = output_dir.map(Path::new);
+    let paths = core::hwp_file_to_svg_files(
+        input_path,
+        output_dir,
+        convert_options(page_index),
+        overwrite,
+    )
+    .map_err(core_error_to_py)?;
+
+    Ok(paths
+        .into_iter()
+        .map(|path| path.to_string_lossy().into_owned())
+        .collect())
+}
+
 #[pymodule]
 #[pyo3(name = "_native")]
 fn hwp_ingest_python(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -94,7 +137,9 @@ fn hwp_ingest_python(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ConvertReport>()?;
     m.add_function(wrap_pyfunction!(analyze_hwp_bytes, m)?)?;
     m.add_function(wrap_pyfunction!(hwp_to_pdf_bytes, m)?)?;
+    m.add_function(wrap_pyfunction!(hwp_to_svg_pages, m)?)?;
     m.add_function(wrap_pyfunction!(hwp_to_pdf_file, m)?)?;
+    m.add_function(wrap_pyfunction!(hwp_to_svg_files, m)?)?;
 
     Ok(())
 }

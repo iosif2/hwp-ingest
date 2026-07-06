@@ -45,10 +45,25 @@ def hwp_to_pdf_bytes(data: bytes, page_index: int | None = None) -> bytes:
     ...
 
 
+def hwp_to_svg_pages(data: bytes, page_index: int | None = None) -> list[bytes]:
+    """Render HWP document pages into SVG bytes."""
+    ...
+
+
 def hwp_to_pdf_file(
     input_path: str,
     output_path: str,
     page_index: int | None = None,
 ) -> ConvertReport:
     """Convert an HWP file into a PDF file."""
+    ...
+
+
+def hwp_to_svg_files(
+    input_path: str,
+    output_dir: str | None = None,
+    page_index: int | None = None,
+    overwrite: bool = False,
+) -> list[str]:
+    """Render HWP document pages into SVG files."""
     ...

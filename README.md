@@ -9,13 +9,13 @@
 
 <p align="center">
   <strong>Rust-backed Python package for Korean HWP/HWPX ingestion.</strong><br>
-  Current public alpha: HWP to PDF conversion through a small typed Python facade.
+  Current public alpha: HWP to PDF conversion and page-level SVG artifacts through a small typed Python facade.
 </p>
 
 ## Current alpha scope
 
-`0.1.0a1` is a public alpha for HWP to PDF conversion. Install it with an exact
-pre-release pin:
+`0.1.0a1` is a public alpha for HWP to PDF conversion and page-level SVG
+artifact output. Install it with an exact pre-release pin:
 
 ```sh
 uv pip install hwp-ingest==0.1.0a1
@@ -32,6 +32,7 @@ cross-builds the wheel and verifies the artifact payload before publishing.
 
 PDF conversion requires the `rsvg-convert` executable from librsvg at runtime.
 The Python wheel does not bundle this executable.
+SVG output does not require rsvg-convert; that executable is only needed for PDF conversion.
 
 Check availability:
 
@@ -89,6 +90,17 @@ pdf_bytes = hwp_ingest.to_pdf_bytes(
 Path("page-1.pdf").write_bytes(pdf_bytes)
 ```
 
+Render SVG page artifacts without the PDF backend:
+
+```python
+from pathlib import Path
+
+import hwp_ingest
+
+svg_pages = hwp_ingest.to_svg_pages(Path("document.hwp").read_bytes())
+Path("page-1.svg").write_bytes(svg_pages[0])
+```
+
 Read basic document metadata:
 
 ```python
@@ -123,6 +135,18 @@ Returns PDF bytes. `page_index` is zero-based. Pass `None` to convert the full
 document.
 
 ```python
+hwp_ingest.to_svg_pages(
+    data: bytes,
+    *,
+    page_index: int | None = None,
+) -> list[bytes]
+```
+
+Returns one SVG document per selected page as bytes. `page_index` is
+zero-based. Pass `None` to render all pages in document order. SVG output does
+not require `rsvg-convert`.
+
+```python
 hwp_ingest.to_pdf_file(
     input_path: str | os.PathLike[str],
     output_path: str | os.PathLike[str] | None = None,
@@ -135,6 +159,22 @@ hwp_ingest.to_pdf_file(
 Writes a PDF and returns the output path. If `output_path` is `None`, the output
 uses the input path with a `.pdf` suffix. Existing output files are protected
 unless `overwrite=True`.
+
+```python
+hwp_ingest.to_svg_files(
+    input_path: str | os.PathLike[str],
+    output_dir: str | os.PathLike[str] | None = None,
+    *,
+    page_index: int | None = None,
+    overwrite: bool = False,
+) -> list[pathlib.Path]
+```
+
+Writes one SVG file per selected page and returns paths in page order. If
+`output_dir` is `None`, SVG files are written beside the input file. Generated
+filenames are stable and use one-based visible page numbers:
+`<stem>.page-0001.svg`, `<stem>.page-0002.svg`, and so on. Existing output
+files are protected unless `overwrite=True`.
 
 ### Errors
 
