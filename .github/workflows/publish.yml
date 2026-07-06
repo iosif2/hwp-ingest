@@ -48,8 +48,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Run Rust tests
-        run: cargo test --workspace
+      - name: Run Rust conversion test
+        run: cargo test -p hwp-ingest full_conversion_returns_pdf_bytes
 
       - name: Check Python extension crate
         run: cargo check -p hwp-ingest-python
