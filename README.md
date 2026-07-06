@@ -14,13 +14,13 @@
 
 ## Current alpha scope
 
-`0.1.0a1` is a public alpha for HWP to PDF conversion and page-level SVG
+`0.1.0a2` is a public alpha for HWP to PDF conversion and page-level SVG
 artifact output. Install it with an exact pre-release pin:
 
 ```sh
-uv pip install hwp-ingest==0.1.0a1
+uv pip install hwp-ingest==0.1.0a2
 # or
-python -m pip install hwp-ingest==0.1.0a1
+python -m pip install hwp-ingest==0.1.0a2
 ```
 
 Release CI is configured to build Linux x86_64/aarch64, macOS Intel/Apple
