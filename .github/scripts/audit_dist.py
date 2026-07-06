@@ -38,7 +38,7 @@ def assert_contains(names: set[str], item: str, context: str) -> None:
         raise SystemExit(f"missing {item} in {context}")
 
 
-def audit_wheel(path: Path, version: str) -> None:
+def audit_wheel(path: Path, version: str, development_classifier: str) -> None:
     print(f"auditing wheel: {path.name}")
     with zipfile.ZipFile(path) as archive:
         names = set(archive.namelist())
@@ -53,8 +53,11 @@ def audit_wheel(path: Path, version: str) -> None:
         metadata = archive.read(metadata_name).decode()
         if f"Version: {version}" not in metadata:
             raise SystemExit(f"wheel {path.name} metadata does not contain Version: {version}")
-        if "Classifier: Development Status :: 3 - Alpha" not in metadata:
-            raise SystemExit(f"wheel {path.name} is missing alpha classifier")
+        expected = f"Classifier: {development_classifier}"
+        if expected not in metadata:
+            raise SystemExit(
+                f"wheel {path.name} is missing development classifier: {development_classifier}"
+            )
 
 
 def audit_sdist(path: Path, version: str) -> None:
@@ -84,7 +87,13 @@ def main() -> None:
     parser.add_argument("--dist", default="dist")
     args = parser.parse_args()
 
-    version = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
+    project_metadata = tomllib.loads(Path("pyproject.toml").read_text())["project"]
+    version = project_metadata["version"]
+    development_classifier = next(
+        classifier
+        for classifier in project_metadata["classifiers"]
+        if classifier.startswith("Development Status :: ")
+    )
     dist = Path(args.dist)
     wheels = sorted(dist.glob("*.whl"))
     sdists = sorted(dist.glob("*.tar.gz"))
@@ -101,7 +110,7 @@ def main() -> None:
 
     audit_sdist(sdists[0], version)
     for wheel in wheels:
-        audit_wheel(wheel, version)
+        audit_wheel(wheel, version, development_classifier)
 
 
 if __name__ == "__main__":
