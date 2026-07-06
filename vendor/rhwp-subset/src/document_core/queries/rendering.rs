@@ -274,6 +274,19 @@ impl DocumentCore {
         self.render_page_svg_legacy_native(page_num)
     }
 
+    pub fn render_page_svg_native_with_compat(
+        &self,
+        page_num: u32,
+        options: crate::renderer::compat::RenderCompatibilityOptions,
+    ) -> Result<String, HwpError> {
+        let previous = self.layout_engine.render_compatibility_options();
+        self.layout_engine.set_render_compatibility_options(options);
+        let result = self.render_page_svg_native(page_num);
+        self.layout_engine
+            .set_render_compatibility_options(previous);
+        result
+    }
+
     pub fn render_page_svg_legacy_native(&self, page_num: u32) -> Result<String, HwpError> {
         let tree = self.build_page_tree(page_num)?;
         let _overflows = self.layout_engine.take_overflows();

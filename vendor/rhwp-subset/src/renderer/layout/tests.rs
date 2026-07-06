@@ -803,6 +803,280 @@ fn test_layout_table_basic() {
 }
 
 #[test]
+fn hancom_render_compat_clamps_non_overlay_body_table_to_flow_anchor() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertAlign, VertRelTo};
+    use crate::model::table::{Cell, Table};
+    use crate::renderer::compat::RenderCompatibilityOptions;
+
+    let engine = LayoutEngine::with_default_dpi();
+    engine
+        .set_render_compatibility_options(RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY);
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+
+    let mut common = CommonObjAttr::default();
+    common.treat_as_char = false;
+    common.text_wrap = TextWrap::TopAndBottom;
+    common.vert_rel_to = VertRelTo::Paper;
+    common.vert_align = VertAlign::Top;
+    common.vertical_offset = 0;
+    common.width = 6000;
+    common.height = 1200;
+
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        common,
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 6000,
+            height: 1200,
+            paragraphs: vec![Paragraph::default()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let paragraphs = vec![Paragraph {
+        controls: vec![Control::Table(Box::new(table))],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let styles = ResolvedStyleSet::default();
+    let body_area_y = layout.body_area.y;
+
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![PageItem::Table {
+                para_index: 0,
+                control_index: 0,
+            }],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    };
+
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &styles,
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+
+    let body = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body node should exist");
+    let col = body
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Column(_)))
+        .expect("body column should exist");
+    let table_node = col
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Table(_)))
+        .expect("compat-clamped table should remain under the body column");
+
+    assert!(
+        table_node.bbox.y >= body_area_y,
+        "compat-clamped table y={} must not render above body flow anchor {}",
+        table_node.bbox.y,
+        body_area_y
+    );
+}
+
+#[test]
+fn hancom_render_compat_stacks_empty_anchor_non_tac_table_after_tac_table() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+    use crate::model::table::{Cell, Table};
+    use crate::renderer::compat::RenderCompatibilityOptions;
+
+    fn single_cell_table(mut common: CommonObjAttr) -> Table {
+        common.width = 6000;
+        common.height = 1200;
+        Table {
+            row_count: 1,
+            col_count: 1,
+            row_sizes: vec![1],
+            common,
+            cells: vec![Cell {
+                col: 0,
+                row: 0,
+                col_span: 1,
+                row_span: 1,
+                width: 6000,
+                height: 1200,
+                paragraphs: vec![Paragraph::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    engine
+        .set_render_compatibility_options(RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY);
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+
+    let mut tac_common = CommonObjAttr::default();
+    tac_common.treat_as_char = true;
+    tac_common.text_wrap = TextWrap::TopAndBottom;
+    tac_common.vert_rel_to = VertRelTo::Para;
+    tac_common.height = 4200;
+    let tac_table = single_cell_table(tac_common);
+
+    let mut non_tac_common = CommonObjAttr::default();
+    non_tac_common.treat_as_char = false;
+    non_tac_common.text_wrap = TextWrap::TopAndBottom;
+    non_tac_common.vert_rel_to = VertRelTo::Para;
+    non_tac_common.vertical_offset = 0;
+    let non_tac_table = single_cell_table(non_tac_common);
+
+    let paragraphs = vec![Paragraph {
+        controls: vec![
+            Control::Table(Box::new(tac_table)),
+            Control::Table(Box::new(non_tac_table)),
+        ],
+        line_segs: vec![LineSeg {
+            line_height: 1200,
+            text_height: 1200,
+            baseline_distance: 1000,
+            line_spacing: 0,
+            segment_width: 50000,
+            tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let styles = ResolvedStyleSet::default();
+
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 0,
+                },
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 1,
+                },
+            ],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+    };
+
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &styles,
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+
+    let body = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body node should exist");
+    let col = body
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Column(_)))
+        .expect("body column should exist");
+    let tables: Vec<_> = col
+        .children
+        .iter()
+        .filter(|node| matches!(node.node_type, RenderNodeType::Table(_)))
+        .collect();
+
+    assert_eq!(tables.len(), 2);
+    let tac_bottom = tables[0].bbox.y + tables[0].bbox.height;
+    assert!(
+        tables[1].bbox.y >= tac_bottom - 0.5,
+        "non-TAC table y={} must not overlap previous TAC table bottom {}",
+        tables[1].bbox.y,
+        tac_bottom
+    );
+}
+
+#[test]
+fn rhwp_native_compat_keeps_default_options_disabled() {
+    use crate::renderer::compat::RenderCompatibilityOptions;
+
+    assert_eq!(
+        RenderCompatibilityOptions::default(),
+        RenderCompatibilityOptions::RHWP_NATIVE
+    );
+    assert_eq!(
+        LayoutEngine::with_default_dpi().render_compatibility_options(),
+        RenderCompatibilityOptions::RHWP_NATIVE
+    );
+}
+
+#[test]
 fn test_layout_table_cell_positions() {
     use crate::model::control::Control;
     use crate::model::table::{Cell, Table};

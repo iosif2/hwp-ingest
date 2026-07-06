@@ -3,6 +3,7 @@
 //! 페이지 분할 결과를 받아 각 요소의 정확한 위치와 크기를 계산하고
 //! 렌더 트리(PageRenderTree)를 생성한다.
 
+use super::compat::{should_clamp_non_overlay_body_table_to_flow, RenderCompatibilityOptions};
 use super::composer::{compose_paragraph, effective_text_for_metrics, ComposedParagraph};
 use super::float_placement::{
     horizontal_range, is_para_topbottom_float, signed_hwpunit, FloatLaneSet, FloatPlacementContext,
@@ -922,6 +923,8 @@ pub struct LayoutEngine {
     /// [Task #1147 v2] HWPX 원본 여부 — 빈 앵커 TopAndBottom 비-TAC 표 직후 갭을
     /// typeset (host_line_spacing=0) 과 동일하게 0 으로 억제하기 위한 트리거.
     is_hwpx_source: std::cell::Cell<bool>,
+    /// hwp-ingest-local render compatibility options. Defaults to upstream rhwp behavior.
+    render_compatibility_options: std::cell::Cell<RenderCompatibilityOptions>,
 }
 
 mod border_rendering;
@@ -986,12 +989,23 @@ impl LayoutEngine {
             is_hwp3_variant: std::cell::Cell::new(false),
             use_hwp3_origin_flow_spacing_before: std::cell::Cell::new(false),
             is_hwpx_source: std::cell::Cell::new(false),
+            render_compatibility_options: std::cell::Cell::new(
+                RenderCompatibilityOptions::RHWP_NATIVE,
+            ),
         }
     }
 
     /// 기본 DPI(96)로 생성
     pub fn with_default_dpi() -> Self {
         Self::new(DEFAULT_DPI)
+    }
+
+    pub fn set_render_compatibility_options(&self, options: RenderCompatibilityOptions) {
+        self.render_compatibility_options.set(options);
+    }
+
+    pub fn render_compatibility_options(&self) -> RenderCompatibilityOptions {
+        self.render_compatibility_options.get()
     }
 
     /// 레이아웃 검증 결과 조회 및 리셋
@@ -1289,6 +1303,16 @@ impl LayoutEngine {
             layout.page_height,
         );
 
+        let previous_paper_width = self.current_paper_width.get();
+        let previous_body_area = self.current_body_area.get();
+        self.current_paper_width.set(layout.page_width);
+        self.current_body_area.set((
+            layout.body_area.x,
+            layout.body_area.y,
+            layout.body_area.width,
+            layout.body_area.height,
+        ));
+
         // 페이지 배경 (감추기 설정 시 건너뜀)
         let hide_fill = page_content
             .page_hide
@@ -1481,6 +1505,9 @@ impl LayoutEngine {
             page_border_fill,
         );
         tree.root.children.push(footer_node);
+
+        self.current_paper_width.set(previous_paper_width);
+        self.current_body_area.set(previous_body_area);
 
         tree
     }
@@ -5336,12 +5363,19 @@ impl LayoutEngine {
                     } else {
                         0.0
                     };
+                let compat_clamps_body_table = should_clamp_non_overlay_body_table_to_flow(
+                    self.render_compatibility_options.get(),
+                    &t.common,
+                    0,
+                    self.is_body_flow_col_area(col_area),
+                );
                 // vert=Paper로 body_area 위에 배치되는 표
                 // 본문 영역 외부(머리말/꼬리말 자리)에 그려지는 페이지/페이퍼 앵커 TopAndBottom 표는
                 // 본문 흐름의 y_offset을 진행시키지 않고 out-of-flow로 paper_images에 렌더한다.
                 // (Task #295: vert=Page valign=Bottom 푸터 표가 좌단 y_offset을 본문 하단으로
                 //  끌어올려 후속 콘텐츠를 깨뜨리는 문제 수정 — Paper만 다루던 기존 분기를 Page까지 확장)
-                let renders_outside_body = !is_tac
+                let renders_outside_body = !compat_clamps_body_table
+                    && !is_tac
                     && matches!(
                         t.common.vert_rel_to,
                         crate::model::shape::VertRelTo::Paper
@@ -5381,6 +5415,11 @@ impl LayoutEngine {
                         let v_offset_px =
                             hwpunit_to_px(signed_hwpunit(t.common.vertical_offset), self.dpi);
                         let raw_top = (para_y_for_table + v_offset_px).max(para_y_for_table);
+                        let raw_top = if compat_clamps_body_table {
+                            raw_top.max(y_offset)
+                        } else {
+                            raw_top
+                        };
                         let lane_top = para_float_lanes
                             .entry(para_index)
                             .or_default()
@@ -5433,8 +5472,13 @@ impl LayoutEngine {
                     } else if let Some((_, iy)) = inline_pos {
                         iy
                     } else if let Some(anchor_y) = square_anchor_y {
-                        table_visual_shift = (anchor_y - y_offset).max(0.0);
-                        anchor_y
+                        let clamped_anchor_y = if compat_clamps_body_table {
+                            anchor_y.max(y_offset)
+                        } else {
+                            anchor_y
+                        };
+                        table_visual_shift = (clamped_anchor_y - y_offset).max(0.0);
+                        clamped_anchor_y
                     } else if tac_detached_line_shift > 0.0 {
                         y_offset + tac_detached_line_shift
                     } else {

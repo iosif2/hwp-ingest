@@ -9,6 +9,7 @@ use crate::model::style::{LineSpacingType, UnderlineType};
 
 pub mod canvas;
 pub mod canvaskit_policy;
+pub mod compat;
 pub mod composer;
 pub mod equation;
 pub(crate) mod equation_tac_flow;

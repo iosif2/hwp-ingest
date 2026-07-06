@@ -199,6 +199,15 @@ impl HwpDocument {
         DocumentCore::from_bytes(data).map(|core| HwpDocument { core })
     }
 
+    pub fn render_page_svg_native_with_compat(
+        &self,
+        page_num: u32,
+        options: crate::renderer::compat::RenderCompatibilityOptions,
+    ) -> Result<String, HwpError> {
+        self.core
+            .render_page_svg_native_with_compat(page_num, options)
+    }
+
     pub fn find_initial_column_def(paragraphs: &[Paragraph]) -> ColumnDef {
         DocumentCore::find_initial_column_def(paragraphs)
     }

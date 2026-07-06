@@ -35,6 +35,7 @@ fn effective_margin_left_line(margin_left: f64, indent: f64, line_n: usize) -> f
     margin_left + line_indent
 }
 
+use super::super::compat::should_clamp_non_overlay_body_table_to_flow;
 use super::super::composer::effective_text_for_metrics;
 use super::super::{hwpunit_to_px, ShapeStyle};
 use super::border_rendering::{
@@ -635,6 +636,10 @@ impl LayoutEngine {
         } else {
             0.0
         };
+        let body_flow_context = depth == 0
+            && table_meta.is_some()
+            && !header_footer_padding_compat
+            && self.is_body_flow_col_area(col_area);
 
         // inline_x_override가 있으면 외부에서 inline 위치를 계산했으므로 x/y 기준은 유지한다.
         // 단, Top 캡션은 표 본문 위의 별도 영역이므로 표 본문 y 에 캡션 높이만큼 반영한다.
@@ -650,6 +655,7 @@ impl LayoutEngine {
                 caption_height,
                 caption_spacing,
                 para_y,
+                body_flow_context,
             ) - split_y_offset
         };
         let inline_table_flow_y_shift = if inline_x_override.is_some() {
@@ -1811,6 +1817,7 @@ impl LayoutEngine {
         caption_height: f64,
         caption_spacing: f64,
         para_y: Option<f64>,
+        body_flow_context: bool,
     ) -> f64 {
         let table_treat_as_char = table.common.treat_as_char;
         let table_text_wrap = if depth == 0 {
@@ -1818,6 +1825,12 @@ impl LayoutEngine {
         } else {
             crate::model::shape::TextWrap::Square
         };
+        let compat_clamps_body_table = should_clamp_non_overlay_body_table_to_flow(
+            self.render_compatibility_options.get(),
+            &table.common,
+            depth,
+            body_flow_context,
+        );
 
         if depth == 0
             && !table_treat_as_char
@@ -1900,16 +1913,25 @@ impl LayoutEngine {
             // 앞선 표/텍스트가 차지한 영역(y_start) 아래로 밀어내고, 본문 영역 내로 클램핑
             // Task #347: TopAndBottom 만 y_start 이하로 밀어냄. 글뒤로(BehindText) /
             // 글앞으로(InFrontOfText) 표는 절대 위치 오버레이이므로 push-down 미적용.
-            if matches!(vert_rel_to, crate::model::shape::VertRelTo::Para) {
+            if matches!(vert_rel_to, crate::model::shape::VertRelTo::Para)
+                || compat_clamps_body_table
+            {
                 let body_top = col_area.y;
                 let body_bottom = col_area.y + col_area.height - table_height;
                 let pushed =
-                    if matches!(table_text_wrap, crate::model::shape::TextWrap::TopAndBottom) {
+                    if matches!(table_text_wrap, crate::model::shape::TextWrap::TopAndBottom)
+                        && (matches!(vert_rel_to, crate::model::shape::VertRelTo::Para)
+                            || compat_clamps_body_table)
+                    {
                         raw_y.max(y_start)
                     } else {
                         raw_y
                     };
-                pushed.clamp(body_top, body_bottom.max(body_top))
+                if matches!(vert_rel_to, crate::model::shape::VertRelTo::Para) {
+                    pushed.clamp(body_top, body_bottom.max(body_top))
+                } else {
+                    pushed
+                }
             } else {
                 raw_y
             }

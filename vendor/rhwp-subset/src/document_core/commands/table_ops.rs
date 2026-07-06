@@ -1605,6 +1605,11 @@ impl DocumentCore {
             table.common.prevent_page_break = val;
         }
 
+        while table.raw_ctrl_data.len() < common_obj_offsets::FLAGS.end {
+            table.raw_ctrl_data.push(0);
+        }
+        table.raw_ctrl_data[common_obj_offsets::FLAGS].copy_from_slice(&table.attr.to_le_bytes());
+
         // 바깥 여백 (CommonObjAttr margin ranges, parse_common_obj_attr 정합)
         if table.raw_ctrl_data.len() >= common_obj_offsets::MARGIN_BOTTOM.end {
             if let Some(v) = json_i16(json, "outerLeft") {
