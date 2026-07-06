@@ -1,0 +1,221 @@
+---
+name: Publish
+
+'on':
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  MATURIN_VERSION: v1.14.1
+
+jobs:
+  version:
+    name: Verify release tag
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - name: Check tag matches pyproject version
+        run: python .github/scripts/check_release_tag.py
+
+  test:
+    name: Test / Ubuntu
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Install rsvg-convert
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin
+          rsvg-convert --version
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Run Rust tests
+        run: cargo test --workspace
+
+      - name: Check Python extension crate
+        run: cargo check -p hwp-ingest-python
+
+      - name: Install native extension
+        run: uv run maturin develop
+
+      - name: Run Python tests
+        run: uv run pytest
+
+  sdist:
+    name: Source distribution
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Build sdist
+        run: uv run maturin sdist --out dist
+
+      - name: Upload sdist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  wheels:
+    name: Wheel / ${{ matrix.platform.name }}
+    needs: test
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: linux-x86_64
+            runner: ubuntu-latest
+            target: x86_64
+            manylinux: "2_28"
+            smoke: true
+          - name: linux-aarch64
+            runner: ubuntu-latest
+            target: aarch64
+            manylinux: "2_28"
+            smoke: false
+          - name: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            smoke: true
+          - name: macos-aarch64
+            runner: macos-14
+            target: aarch64-apple-darwin
+            smoke: true
+          - name: windows-x86_64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            smoke: true
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+
+      - name: Set up QEMU
+        if: matrix.platform.name == 'linux-aarch64'
+        uses: docker/setup-qemu-action@v3
+
+      - name: Build Linux wheel
+        if: runner.os == 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux }}
+          args: --release --locked --out dist --compatibility pypi
+
+      - name: Build host wheel
+        if: runner.os != 'Linux'
+        uses: PyO3/maturin-action@v1
+        with:
+          command: build
+          maturin-version: ${{ env.MATURIN_VERSION }}
+          target: ${{ matrix.platform.target }}
+          args: --release --locked --out dist --compatibility pypi
+
+      - name: Install rsvg-convert on Linux
+        if: matrix.platform.smoke && runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y librsvg2-bin
+          rsvg-convert --version
+
+      - name: Install rsvg-convert on macOS
+        if: matrix.platform.smoke && runner.os == 'macOS'
+        run: |
+          brew install librsvg
+          rsvg-convert --version
+
+      - name: Install rsvg-convert on Windows
+        if: matrix.platform.smoke && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install rsvg-convert -y --no-progress
+          Get-Command rsvg-convert
+          rsvg-convert --version
+
+      - name: Smoke-test native wheel
+        if: matrix.platform.smoke
+        run: python .github/scripts/smoke_wheel.py --dist dist
+
+      - name: Upload wheel artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist-${{ matrix.platform.name }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  verify-dist:
+    name: Verify distributions
+    needs: [sdist, wheels]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Audit distribution payloads
+        run: python .github/scripts/audit_dist.py --dist dist
+
+      - name: Check package metadata
+        run: uvx twine check dist/*
+
+  publish:
+    name: Publish to PyPI
+    needs: verify-dist
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/hwp-ingest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: dist-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish package distributions to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

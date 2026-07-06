@@ -4,16 +4,28 @@ build-backend = "maturin"
 
 [project]
 name = "hwp-ingest"
-version = "0.1.0"
+version = "0.1.0a1"
 description = "Python bindings for native rhwp HWP to PDF conversion"
 readme = "README.md"
 requires-python = ">=3.10"
 license = "MIT"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.md", "licenses/*", "vendor/rhwp-subset/NOTICE"]
+keywords = ["hwp", "hwpx", "pdf", "document-conversion"]
 classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Programming Language :: Rust",
     "Typing :: Typed",
 ]
+
+[project.urls]
+Repository = "https://github.com/iosif2/hwp-ingest"
+Issues = "https://github.com/iosif2/hwp-ingest/issues"
 
 [dependency-groups]
 dev = [
@@ -27,6 +39,13 @@ python-source = "python"
 module-name = "hwp_ingest._native"
 bindings = "pyo3"
 strip = true
+include = [
+    { path = "LICENSE", format = "sdist" },
+    { path = "NOTICE", format = "sdist" },
+    { path = "THIRD_PARTY_LICENSES.md", format = "sdist" },
+    { path = "licenses/*", format = "sdist" },
+    { path = "vendor/rhwp-subset/NOTICE", format = "sdist" },
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests/python"]
