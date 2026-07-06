@@ -7,4 +7,13 @@ Imported tag: v0.7.17
 License: MIT
 Copyright: Copyright (c) 2025-2026 Edward Kim
 
-The upstream-derived code is stored under vendor/rhwp-subset. hwp-ingest adapter and binding code remains outside that tree.
+Hancom HWP notice:
+본 제품은 한글과컴퓨터의 HWP 문서 파일(.hwp) 공개 문서를 참고하여 개발하였습니다.
+
+Trademark notice:
+"한글", "한컴", "HWP", and "HWPX" are registered trademarks of Hancom Inc.
+hwp-ingest is an independent open-source project and is not affiliated with,
+sponsored by, or endorsed by Hancom Inc.
+
+The upstream-derived code is stored under vendor/rhwp-subset. hwp-ingest adapter
+and binding code remains outside that tree.

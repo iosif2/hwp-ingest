@@ -8,12 +8,14 @@ use pyo3::types::{PyBytes, PyModule};
 
 create_exception!(hwp_ingest, HwpIngestError, pyo3::exceptions::PyException);
 
+/// Basic metadata for an analyzed HWP document.
 #[pyclass(frozen, module = "hwp_ingest._native")]
 struct DocumentInfo {
     #[pyo3(get)]
     page_count: u32,
 }
 
+/// Report returned by native file-to-file PDF conversion.
 #[pyclass(frozen, module = "hwp_ingest._native")]
 struct ConvertReport {
     #[pyo3(get)]
@@ -44,6 +46,7 @@ fn core_error_to_py(error: CoreError) -> PyErr {
     }
 }
 
+/// Analyze HWP bytes and return document metadata.
 #[pyfunction]
 #[pyo3(signature = (data))]
 fn analyze_hwp_bytes(data: &[u8]) -> PyResult<DocumentInfo> {
@@ -54,6 +57,7 @@ fn analyze_hwp_bytes(data: &[u8]) -> PyResult<DocumentInfo> {
     })
 }
 
+/// Convert HWP bytes to PDF bytes.
 #[pyfunction]
 #[pyo3(signature = (data, page_index=None))]
 fn hwp_to_pdf_bytes(py: Python<'_>, data: &[u8], page_index: Option<u32>) -> PyResult<Py<PyBytes>> {
@@ -63,6 +67,7 @@ fn hwp_to_pdf_bytes(py: Python<'_>, data: &[u8], page_index: Option<u32>) -> PyR
     Ok(PyBytes::new(py, &pdf).unbind())
 }
 
+/// Convert an HWP file to a PDF file and return a conversion report.
 #[pyfunction]
 #[pyo3(signature = (input_path, output_path, page_index=None))]
 fn hwp_to_pdf_file(

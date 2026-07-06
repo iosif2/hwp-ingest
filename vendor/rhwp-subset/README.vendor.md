@@ -22,7 +22,9 @@ This vendor import contains the upstream Rust crate files required for hwp-inges
 
 Repository samples, web extension packages, studio apps, generated PDFs, and upstream CI/configuration files are intentionally not imported.
 
-## Local changes
+## Local compliance additions
+
+`NOTICE` is added by hwp-ingest. It repeats the Hancom HWP public-document notice and rhwp attribution inside the upstream-derived source subtree so source distributions retain the required notice near the vendored code.
 
 No upstream source files are modified in this import. hwp-ingest adapter, PyO3 binding, and Python facade code live outside `vendor/rhwp-subset`.
 
