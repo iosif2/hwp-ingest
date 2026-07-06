@@ -62,6 +62,68 @@ On Windows, install librsvg/rsvg-convert and ensure `rsvg-convert.exe` is on
 automatic fallback because it is known to drop clipped table text in some HWP
 documents.
 
+## Font fallback and PUA glyphs
+
+`hwp-ingest` does not bundle Hancom or Microsoft fonts. PDF conversion asks
+`rsvg-convert`/fontconfig to resolve the SVG `font-family` chain from fonts
+installed on the system. If a document contains visible Private Use Area (PUA)
+characters, such as Hancom symbol slots, a generic Unicode font is not enough:
+PUA codepoints do not define a standard glyph shape. They render correctly only
+when the owning document font is installed, or when the project adds a
+source-backed codepoint mapping for that specific symbol set.
+
+The current renderer preserves the document font name first, then appends
+Korean-compatible fallback families. For Batang/Myeongjo/serif text the fallback
+chain is:
+
+```text
+document font → Batang/바탕 → Nanum Myeongjo → AppleMyungjo →
+Noto Serif KR / Noto Serif CJK KR →
+HCR Batang Ext-B / 함초롬바탕 확장B →
+HCR Batang Ext / 함초롬바탕 확장 →
+HCR Batang / 함초롬바탕 →
+Source Han Serif K Old Hangul → serif
+```
+
+For Dotum/Gothic/Gulim/sans-serif text the fallback chain is:
+
+```text
+document font → Malgun Gothic/맑은 고딕 → Apple SD Gothic Neo →
+Noto Sans KR ExtraLight → Noto Sans KR → Pretendard →
+HCR Batang Ext-B / 함초롬바탕 확장B →
+HCR Batang Ext / 함초롬바탕 확장 →
+HCR Batang / 함초롬바탕 →
+Source Han Serif K Old Hangul → sans-serif
+```
+
+For Hancom-origin documents with PUA symbols, install the matching licensed font
+on the machine running conversion. The common families to check first are
+`HCR Batang`/`함초롬바탕` and `HCR Dotum`/`함초롬돋움`; Windows-origin documents
+may also need `Batang`, `Dotum`, `Gulim`, `Gungsuh`, or `Malgun Gothic`. Some
+older HWP documents reference HY/Hanyang fonts such as `HY울릉도L`,
+`HY헤드라인M`, `HY견고딕`, `HY그래픽`, `HY견명조`, or `HY신명조`.
+
+Linux/fontconfig check:
+
+```sh
+fc-match "HCR Batang"
+fc-match "함초롬바탕"
+fc-match "HCR Dotum"
+```
+
+If these commands resolve to a fallback like Noto or DejaVu instead of the
+expected Hancom/HCR family, install the licensed TTF/OTF files into a system or
+user font directory and refresh fontconfig:
+
+```sh
+# user-local example
+mkdir -p ~/.local/share/fonts/hancom
+cp HCRBatang.ttf HCRBatang-Bold.ttf ~/.local/share/fonts/hancom/
+fc-cache -f ~/.local/share/fonts/hancom
+```
+
+Do not commit restricted font files into this repository.
+
 ## Quick start
 
 Convert an HWP file to a PDF next to the input file:
