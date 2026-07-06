@@ -6,5 +6,6 @@
 - [Vendor and upstream sync policy](vendor-and-upstream-sync-policy.md)
 - [MVP API and Rust batch engine direction](mvp-api-and-rust-batch-engine.md)
 - [PDF backend policy](pdf-backend-policy.md)
+- [SVG artifact API decision](svg-artifact-api-decision.md)
 - [Semantic outputs and production pipeline direction](semantic-outputs-and-production-pipeline.md)
 - [Typing and build workflow](typing-and-build-workflow.md)
