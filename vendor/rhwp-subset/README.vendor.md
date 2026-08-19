@@ -31,6 +31,14 @@ The initial import preserved upstream source files without modification. Follow-
 
 Current hwp-ingest-local parser/layout/render compatibility patches and conversion-time render option patches are recorded in LOCAL_CHANGES.md and must be reviewed during upstream sync.
 
+## Selective upstream backports
+
+Some `LOCAL_CHANGES.md` entries are not hwp-ingest-local inventions but selective backports of correctness fixes from later upstream `rhwp` commits, applied without a full resync. Each such entry names the upstream commit hash and issue/task number it ports. Because `vendor/rhwp-subset` does not carry upstream git history, these are adapted to this subset's baseline (`0335119`) rather than cherry-picked verbatim when the upstream code has diverged since.
+
+Backported so far:
+
+- `e893b65d9` (upstream Task #2220) — TAC host line `outer_margin` double-counting fix in `src/renderer/layout.rs`.
+
 ## Sync rule
 
 The first vendor import preserves the imported upstream subset without source modification. Follow-up changes that prune or adapt upstream-derived code must be separate commits. Whenever parser/layout/render files are locally patched, update both this file and `LOCAL_CHANGES.md` in the same commit. Upstream sync starts by diffing from the recorded base commit, then ports parser/layout/render changes, reruns fixture regression checks, and updates this metadata plus license notices.

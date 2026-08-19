@@ -2,6 +2,22 @@
 
 This file records hwp-ingest-local changes applied after the recorded upstream import because vendor/rhwp-subset is a surgical source subset and does not carry upstream git history. Keep one reverse-chronological entry per hwp-ingest commit that changes upstream-derived source files.
 
+## 2026-08-19 — TAC host line outer_margin double-counting fix (upstream backport)
+
+Status: selective upstream backport, adapted to this subset's baseline; not a local invention. Ports upstream commit `e893b65d9` (upstream Task #2220).
+
+Scope: vendor/rhwp-subset TAC table host-line advance calculation in the SVG/PDF render tree layout path used by hwp-ingest conversion; product adapter/core/Python API policy remains outside the vendored tree.
+
+Problem: When a document's saved host `LineSeg.line_height` already accounts for a treat-as-char (TAC) table's declared height plus its `outer_margin_top`/`outer_margin_bottom`, the existing Task #9/#521 advance calculation applied `outer_margin_bottom` a second time on top of that already-inclusive line height, pushing following body content down by the outer_margin sum and clipping the bottom line of the affected column/page.
+
+Root cause: `LayoutEngine::layout_table_item`'s TAC advance branch (negative `line_spacing`, Fixed line spacing) always computed `y_offset = tac_table_y_before + advance` and then unconditionally added `outer_margin_bottom_px` (Task #521), with no check for whether `advance` (derived from the stored `line_height`) already included the table's outer margins.
+
+Behavior: When stored `line_height >= table height + outer_margin_top + outer_margin_bottom - 10` (HWPUNIT tolerance) and the margin sum is positive, the advance now uses `para_y_for_table + advance` and skips the Task #521 `outer_margin_bottom` addition, matching upstream `e893b65d9`. Paths without this coverage evidence (the common case Task #9/#521 were calibrated against) are unchanged.
+
+Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/renderer/layout.rs`, and `src/renderer/layout/tests.rs`.
+
+Upstream sync: Remove this local patch once the vendor baseline is resynced to a commit that includes upstream `e893b65d9` or a later equivalent fix.
+
 ## 2026-07-09 — render option for header/footer omission
 
 Status: hwp-ingest-local render option; removable if upstream exposes an equivalent transient render option.
