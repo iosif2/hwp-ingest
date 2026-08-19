@@ -29,7 +29,7 @@ Other repository samples, web extension packages, studio apps, generated PDFs, a
 
 The initial import preserved upstream source files without modification. Follow-up hwp-ingest-local source patches are tracked in `LOCAL_CHANGES.md`. hwp-ingest adapter, PyO3 binding, and Python facade code live outside `vendor/rhwp-subset`.
 
-Current hwp-ingest-local parser/layout/render compatibility patches are recorded in LOCAL_CHANGES.md and must be reviewed during upstream sync.
+Current hwp-ingest-local parser/layout/render compatibility patches and conversion-time render option patches are recorded in LOCAL_CHANGES.md and must be reviewed during upstream sync.
 
 ## Sync rule
 

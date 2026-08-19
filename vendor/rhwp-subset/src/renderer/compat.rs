@@ -3,16 +3,24 @@ use crate::model::shape::{CommonObjAttr, TextWrap};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RenderCompatibilityOptions {
     pub clamp_non_overlay_body_tables_to_flow: bool,
+    pub omit_header_footer: bool,
 }
 
 impl RenderCompatibilityOptions {
     pub const RHWP_NATIVE: Self = Self {
         clamp_non_overlay_body_tables_to_flow: false,
+        omit_header_footer: false,
     };
 
     pub const HANCOM_RENDER_COMPATIBILITY: Self = Self {
         clamp_non_overlay_body_tables_to_flow: true,
+        omit_header_footer: false,
     };
+
+    pub fn with_omit_header_footer(mut self, omit_header_footer: bool) -> Self {
+        self.omit_header_footer = omit_header_footer;
+        self
+    }
 }
 
 impl Default for RenderCompatibilityOptions {
@@ -47,6 +55,9 @@ mod tests {
             RenderCompatibilityOptions::default(),
             RenderCompatibilityOptions::RHWP_NATIVE
         );
+        assert!(!RenderCompatibilityOptions::default().omit_header_footer);
+        assert!(!RenderCompatibilityOptions::RHWP_NATIVE.omit_header_footer);
+        assert!(!RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY.omit_header_footer);
     }
 
     #[test]

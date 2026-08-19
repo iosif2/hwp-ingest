@@ -9,6 +9,7 @@ use hwp_ingest_rhwp_adapter::RhwpAdapterError;
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConvertOptions {
     pub page_index: Option<u32>,
+    pub omit_header_footer: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,6 +96,13 @@ impl From<RhwpAdapterError> for HwpIngestError {
     }
 }
 
+fn adapter_render_options(options: ConvertOptions) -> hwp_ingest_rhwp_adapter::RenderOptions {
+    hwp_ingest_rhwp_adapter::RenderOptions {
+        page_index: options.page_index,
+        omit_header_footer: options.omit_header_footer,
+    }
+}
+
 pub fn analyze_hwp_bytes(data: &[u8]) -> Result<DocumentInfo, HwpIngestError> {
     let info = hwp_ingest_rhwp_adapter::analyze_hwp_bytes(data)?;
 
@@ -104,14 +112,15 @@ pub fn analyze_hwp_bytes(data: &[u8]) -> Result<DocumentInfo, HwpIngestError> {
 }
 
 pub fn hwp_to_pdf_bytes(data: &[u8], options: ConvertOptions) -> Result<Vec<u8>, HwpIngestError> {
-    hwp_ingest_rhwp_adapter::hwp_to_pdf_bytes(data, options.page_index).map_err(Into::into)
+    hwp_ingest_rhwp_adapter::hwp_to_pdf_bytes(data, adapter_render_options(options))
+        .map_err(Into::into)
 }
 
 pub fn hwp_to_svg_pages(
     data: &[u8],
     options: ConvertOptions,
 ) -> Result<Vec<SvgPage>, HwpIngestError> {
-    let pages = hwp_ingest_rhwp_adapter::hwp_to_svg_pages(data, options.page_index)?;
+    let pages = hwp_ingest_rhwp_adapter::hwp_to_svg_pages(data, adapter_render_options(options))?;
 
     Ok(pages
         .into_iter()

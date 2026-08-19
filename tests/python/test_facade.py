@@ -60,6 +60,9 @@ def test_negative_page_index_is_python_value_error() -> None:
         hwp_ingest.to_svg_pages(data, page_index=-1)
 
     with pytest.raises(ValueError, match="^page_index must be zero-based and non-negative$"):
+        hwp_ingest.to_svg_pages(data, page_index=-1, omit_header_footer=True)
+
+    with pytest.raises(ValueError, match="^page_index must be zero-based and non-negative$"):
         hwp_ingest.to_svg_files(FIXTURE, Path("unused"), page_index=-1)
 
 
@@ -86,6 +89,54 @@ def test_to_svg_pages_does_not_require_rsvg_convert(monkeypatch: pytest.MonkeyPa
 
     assert len(pages) == 1
     assert pages[0].lstrip().startswith(b"<svg")
+
+
+def test_to_svg_pages_accepts_omit_header_footer_without_rsvg_convert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PATH", "")
+
+    pages = hwp_ingest.to_svg_pages(
+        FIXTURE.read_bytes(),
+        page_index=0,
+        omit_header_footer=True,
+    )
+
+    assert len(pages) == 1
+    assert pages[0].lstrip().startswith(b"<svg")
+
+
+def test_to_pdf_bytes_accepts_omit_header_footer() -> None:
+    pdf = hwp_ingest.to_pdf_bytes(FIXTURE.read_bytes(), omit_header_footer=True)
+
+    assert isinstance(pdf, bytes)
+    assert pdf.startswith(b"%PDF-")
+    assert len(pdf) > 1000
+
+
+def test_to_pdf_file_accepts_omit_header_footer(tmp_path: Path) -> None:
+    output_path = tmp_path / "out.pdf"
+
+    result = hwp_ingest.to_pdf_file(
+        FIXTURE,
+        output_path,
+        omit_header_footer=True,
+    )
+
+    assert result == output_path
+    assert output_path.read_bytes().startswith(b"%PDF-")
+
+
+def test_to_svg_files_accepts_omit_header_footer(tmp_path: Path) -> None:
+    paths = hwp_ingest.to_svg_files(
+        FIXTURE,
+        tmp_path,
+        page_index=0,
+        omit_header_footer=True,
+    )
+
+    assert paths == [tmp_path / "atop-equation-01.page-0001.svg"]
+    assert paths[0].read_bytes().lstrip().startswith(b"<svg")
 
 def test_invalid_hwp_raises_package_error() -> None:
     with pytest.raises(hwp_ingest.HwpIngestError):

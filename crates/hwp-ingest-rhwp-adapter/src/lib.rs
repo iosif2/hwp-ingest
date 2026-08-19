@@ -5,7 +5,7 @@ pub mod render;
 
 pub use layout::DocumentLayoutInfo;
 pub use parse::{analyze_hwp_bytes, parse_hwp_bytes};
-pub use render::{SvgPage, hwp_to_pdf_bytes, hwp_to_svg_pages};
+pub use render::{RenderOptions, SvgPage, hwp_to_pdf_bytes, hwp_to_svg_pages};
 
 use std::error::Error;
 use std::fmt;

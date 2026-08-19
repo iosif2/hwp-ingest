@@ -63,6 +63,7 @@ fn single_page_conversion_returns_pdf_bytes() {
         &data,
         ConvertOptions {
             page_index: Some(0),
+            ..ConvertOptions::default()
         },
     )
     .expect("fixture page should render");
@@ -79,6 +80,7 @@ fn page_count_is_out_of_range_page_index() {
         &data,
         ConvertOptions {
             page_index: Some(info.page_count),
+            ..ConvertOptions::default()
         },
     )
     .expect_err("page_count is one past the last zero-based page");
@@ -123,6 +125,7 @@ fn single_page_svg_matches_first_page() {
         &data,
         ConvertOptions {
             page_index: Some(0),
+            ..ConvertOptions::default()
         },
     )
     .expect("fixture page should render");
@@ -140,6 +143,7 @@ fn svg_conversion_reuses_page_out_of_range_error() {
         &data,
         ConvertOptions {
             page_index: Some(info.page_count),
+            ..ConvertOptions::default()
         },
     )
     .expect_err("page_count is one past the last zero-based page");
@@ -162,6 +166,7 @@ fn svg_files_write_stable_page_paths() {
         Some(&output_dir),
         ConvertOptions {
             page_index: Some(0),
+            ..ConvertOptions::default()
         },
         false,
     )
@@ -192,6 +197,7 @@ fn svg_files_refuse_overwrite() {
         Some(&output_dir),
         ConvertOptions {
             page_index: Some(0),
+            ..ConvertOptions::default()
         },
         false,
     )

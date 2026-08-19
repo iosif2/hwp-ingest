@@ -7,9 +7,15 @@ pub struct SvgPage {
     pub svg: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RenderOptions {
+    pub page_index: Option<u32>,
+    pub omit_header_footer: bool,
+}
+
 pub fn hwp_to_svg_pages(
     data: &[u8],
-    page_index: Option<u32>,
+    options: RenderOptions,
 ) -> Result<Vec<SvgPage>, RhwpAdapterError> {
     let document = parse_hwp_bytes(data)?;
     let page_count = document.inner.page_count();
@@ -18,7 +24,7 @@ pub fn hwp_to_svg_pages(
         return Err(RhwpAdapterError::EmptyDocument);
     }
 
-    if let Some(page) = page_index {
+    if let Some(page) = options.page_index {
         if page >= page_count {
             return Err(RhwpAdapterError::PageOutOfRange {
                 requested: page,
@@ -27,19 +33,19 @@ pub fn hwp_to_svg_pages(
         }
     }
 
-    let pages: Vec<u32> = match page_index {
+    let pages: Vec<u32> = match options.page_index {
         Some(page) => vec![page],
         None => (0..page_count).collect(),
     };
+
+    let render_options = RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY
+        .with_omit_header_footer(options.omit_header_footer);
 
     let mut svg_pages = Vec::with_capacity(pages.len());
     for page in pages {
         let svg = document
             .inner
-            .render_page_svg_native_with_compat(
-                page,
-                RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY,
-            )
+            .render_page_svg_native_with_compat(page, render_options)
             .map_err(|error| RhwpAdapterError::Render(error.to_string()))?;
         svg_pages.push(SvgPage {
             page_index: page,
@@ -50,8 +56,8 @@ pub fn hwp_to_svg_pages(
     Ok(svg_pages)
 }
 
-pub fn hwp_to_pdf_bytes(data: &[u8], page_index: Option<u32>) -> Result<Vec<u8>, RhwpAdapterError> {
-    let svg_pages = hwp_to_svg_pages(data, page_index)?;
+pub fn hwp_to_pdf_bytes(data: &[u8], options: RenderOptions) -> Result<Vec<u8>, RhwpAdapterError> {
+    let svg_pages = hwp_to_svg_pages(data, options)?;
     let svg_documents: Vec<String> = svg_pages.into_iter().map(|page| page.svg).collect();
     pdf_backend::svgs_to_pdf(&svg_documents)
 }
@@ -101,6 +107,24 @@ mod tests {
             .expect("synthetic HWP should serialize")
     }
 
+    fn synthetic_header_footer_hwp_bytes() -> Vec<u8> {
+        let mut doc = rhwp::wasm_api::HwpDocument::create_empty();
+        doc.create_blank_document_native()
+            .expect("blank template should load");
+        doc.insert_text(0, 0, 2, "BODY_SENTINEL_OMIT_HF")
+            .expect("body text should insert");
+        doc.create_header_footer(0, true, 0)
+            .expect("header should be created");
+        doc.insert_text_in_header_footer(0, true, 0, 0, 0, "HEADER_SENTINEL_OMIT_HF")
+            .expect("header text should insert");
+        doc.create_header_footer(0, false, 0)
+            .expect("footer should be created");
+        doc.insert_text_in_header_footer(0, false, 0, 0, 0, "FOOTER_SENTINEL_OMIT_HF")
+            .expect("footer text should insert");
+        doc.export_hwp_native()
+            .expect("synthetic HWP should serialize")
+    }
+
     fn tac_non_tac_overlap_fixture_bytes() -> Vec<u8> {
         let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -119,6 +143,24 @@ mod tests {
             .join("tests/fixtures/tac-behindtext-table-flow.hwp");
         std::fs::read(&fixture)
             .unwrap_or_else(|error| panic!("failed to read {}: {error}", fixture.display()))
+    }
+
+    fn svg_text_content(svg: &str) -> String {
+        let mut text = String::new();
+        let mut remaining = svg;
+        while let Some(text_start) = remaining.find("<text") {
+            remaining = &remaining[text_start..];
+            let Some(content_start) = remaining.find('>') else {
+                break;
+            };
+            remaining = &remaining[content_start + 1..];
+            let Some(content_end) = remaining.find("</text>") else {
+                break;
+            };
+            text.push_str(&remaining[..content_end]);
+            remaining = &remaining[content_end + "</text>".len()..];
+        }
+        text
     }
 
     fn svg_attr_f64(element: &str, attr: &str) -> f64 {
@@ -167,10 +209,53 @@ mod tests {
     }
 
     #[test]
+    fn hwp_to_svg_pages_can_omit_header_footer() {
+        let bytes = synthetic_header_footer_hwp_bytes();
+
+        let default_pages = hwp_to_svg_pages(
+            &bytes,
+            RenderOptions {
+                page_index: Some(0),
+                ..RenderOptions::default()
+            },
+        )
+        .expect("default SVG render should succeed");
+
+        assert_eq!(default_pages.len(), 1);
+        assert_eq!(default_pages[0].page_index, 0);
+        let default_text = svg_text_content(&default_pages[0].svg);
+        assert!(default_text.contains("BODY_SENTINEL_OMIT_HF"));
+        assert!(default_text.contains("HEADER_SENTINEL_OMIT_HF"));
+        assert!(default_text.contains("FOOTER_SENTINEL_OMIT_HF"));
+
+        let omitted_pages = hwp_to_svg_pages(
+            &bytes,
+            RenderOptions {
+                page_index: Some(0),
+                omit_header_footer: true,
+            },
+        )
+        .expect("omitted header/footer SVG render should succeed");
+
+        assert_eq!(omitted_pages.len(), 1);
+        assert_eq!(omitted_pages[0].page_index, 0);
+        let omitted_text = svg_text_content(&omitted_pages[0].svg);
+        assert!(omitted_text.contains("BODY_SENTINEL_OMIT_HF"));
+        assert!(!omitted_text.contains("HEADER_SENTINEL_OMIT_HF"));
+        assert!(!omitted_text.contains("FOOTER_SENTINEL_OMIT_HF"));
+    }
+
+    #[test]
     fn hwp_to_svg_pages_uses_hancom_render_compatibility() {
         let bytes = synthetic_non_overlay_paper_table_hwp_bytes();
-        let adapter_pages =
-            hwp_to_svg_pages(&bytes, Some(0)).expect("adapter SVG render should succeed");
+        let adapter_pages = hwp_to_svg_pages(
+            &bytes,
+            RenderOptions {
+                page_index: Some(0),
+                ..RenderOptions::default()
+            },
+        )
+        .expect("adapter SVG render should succeed");
 
         assert_eq!(adapter_pages.len(), 1);
         assert_eq!(adapter_pages[0].page_index, 0);
@@ -198,8 +283,14 @@ mod tests {
     #[test]
     fn hwp_to_svg_pages_resolves_tac_non_tac_overlap_fixture() {
         let bytes = tac_non_tac_overlap_fixture_bytes();
-        let adapter_pages =
-            hwp_to_svg_pages(&bytes, Some(0)).expect("adapter SVG render should succeed");
+        let adapter_pages = hwp_to_svg_pages(
+            &bytes,
+            RenderOptions {
+                page_index: Some(0),
+                ..RenderOptions::default()
+            },
+        )
+        .expect("adapter SVG render should succeed");
         assert_eq!(adapter_pages.len(), 1);
         assert_eq!(adapter_pages[0].page_index, 0);
 
@@ -225,8 +316,14 @@ mod tests {
     #[test]
     fn hwp_to_svg_pages_reserves_flow_for_tac_behindtext_fixture() {
         let bytes = tac_behindtext_flow_fixture_bytes();
-        let adapter_pages =
-            hwp_to_svg_pages(&bytes, Some(0)).expect("adapter SVG render should succeed");
+        let adapter_pages = hwp_to_svg_pages(
+            &bytes,
+            RenderOptions {
+                page_index: Some(0),
+                ..RenderOptions::default()
+            },
+        )
+        .expect("adapter SVG render should succeed");
         assert_eq!(adapter_pages.len(), 1);
         assert_eq!(adapter_pages[0].page_index, 0);
 
@@ -273,7 +370,13 @@ mod tests {
                 RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY,
             )
             .expect("direct compat render should succeed");
-        let mut adapter_pages = hwp_to_svg_pages(&bytes, Some(0))?;
+        let mut adapter_pages = hwp_to_svg_pages(
+            &bytes,
+            RenderOptions {
+                page_index: Some(0),
+                ..RenderOptions::default()
+            },
+        )?;
         let adapter_svg = adapter_pages.remove(0).svg;
 
         assert_ne!(

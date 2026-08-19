@@ -1358,12 +1358,14 @@ impl LayoutEngine {
             );
         }
 
-        // 머리말 (감추기 설정 시 건너뜀)
-        let hide_header = page_content
-            .page_hide
-            .as_ref()
-            .map(|ph| ph.hide_header)
-            .unwrap_or(false);
+        // 머리말 (감추기 설정 또는 변환 옵션 적용 시 건너뜀)
+        let omit_header_footer = self.render_compatibility_options.get().omit_header_footer;
+        let hide_header = omit_header_footer
+            || page_content
+                .page_hide
+                .as_ref()
+                .map(|ph| ph.hide_header)
+                .unwrap_or(false);
         if !hide_header {
             self.build_header(
                 &mut tree,
@@ -1473,12 +1475,13 @@ impl LayoutEngine {
             layout,
         );
 
-        // 꼬리말 + 쪽 번호 (감추기 설정 시 건너뜀)
-        let hide_footer = page_content
-            .page_hide
-            .as_ref()
-            .map(|ph| ph.hide_footer)
-            .unwrap_or(false);
+        // 꼬리말 + 쪽 번호 (감추기 설정 또는 변환 옵션 적용 시 건너뜀)
+        let hide_footer = omit_header_footer
+            || page_content
+                .page_hide
+                .as_ref()
+                .map(|ph| ph.hide_footer)
+                .unwrap_or(false);
         let mut footer_node = if !hide_footer {
             self.build_footer(
                 &mut tree,

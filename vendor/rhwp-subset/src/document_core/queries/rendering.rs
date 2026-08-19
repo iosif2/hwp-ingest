@@ -280,10 +280,17 @@ impl DocumentCore {
         options: crate::renderer::compat::RenderCompatibilityOptions,
     ) -> Result<String, HwpError> {
         let previous = self.layout_engine.render_compatibility_options();
+        let options_changed = options != previous;
+        if options_changed {
+            self.invalidate_page_tree_cache();
+        }
         self.layout_engine.set_render_compatibility_options(options);
         let result = self.render_page_svg_native(page_num);
         self.layout_engine
             .set_render_compatibility_options(previous);
+        if options_changed {
+            self.invalidate_page_tree_cache();
+        }
         result
     }
 

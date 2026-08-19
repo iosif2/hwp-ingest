@@ -40,12 +40,20 @@ def analyze_hwp_bytes(data: bytes) -> DocumentInfo:
     ...
 
 
-def hwp_to_pdf_bytes(data: bytes, page_index: int | None = None) -> bytes:
+def hwp_to_pdf_bytes(
+    data: bytes,
+    page_index: int | None = None,
+    omit_header_footer: bool = False,
+) -> bytes:
     """Convert HWP document bytes into PDF bytes."""
     ...
 
 
-def hwp_to_svg_pages(data: bytes, page_index: int | None = None) -> list[bytes]:
+def hwp_to_svg_pages(
+    data: bytes,
+    page_index: int | None = None,
+    omit_header_footer: bool = False,
+) -> list[bytes]:
     """Render HWP document pages into SVG bytes."""
     ...
 
@@ -54,6 +62,7 @@ def hwp_to_pdf_file(
     input_path: str,
     output_path: str,
     page_index: int | None = None,
+    omit_header_footer: bool = False,
 ) -> ConvertReport:
     """Convert an HWP file into a PDF file."""
     ...
@@ -64,6 +73,7 @@ def hwp_to_svg_files(
     output_dir: str | None = None,
     page_index: int | None = None,
     overwrite: bool = False,
+    omit_header_footer: bool = False,
 ) -> list[str]:
     """Render HWP document pages into SVG files."""
     ...

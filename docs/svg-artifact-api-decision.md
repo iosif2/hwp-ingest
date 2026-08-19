@@ -17,8 +17,8 @@ SVG output은 first-class rendered artifact API로 설계한다. Public API 이�
 Python API direction:
 
 ```python
-to_svg_pages(data: bytes, *, page_index: int | None = None) -> list[bytes]
-to_svg_files(input_path, output_dir=None, *, page_index=None, overwrite=False) -> list[Path]
+to_svg_pages(data: bytes, *, page_index: int | None = None, omit_header_footer: bool = False) -> list[bytes]
+to_svg_files(input_path, output_dir=None, *, page_index=None, overwrite=False, omit_header_footer=False) -> list[Path]
 ```
 
 Rust engine API direction:
@@ -35,6 +35,8 @@ The concrete Rust type names may change during implementation, but the boundary 
 `to_svg_pages` returns one SVG document per selected page as bytes. It always returns `list[bytes]`, including when `page_index` selects a single page. This avoids a return type that changes between `bytes` and `list[bytes]` depending on the option.
 
 `page_index` follows the existing MVP convention: it is a 0-based page index, and `None` means all pages in document order.
+
+`omit_header_footer`는 SVG와 PDF가 공유하는 render option이다. hwp-ingest PDF output은 SVG-derived이므로, 이 옵션은 SVG render 단계에서 적용되고 PDF는 동일한 page artifact를 사용한다.
 
 `to_svg_files` writes one `.svg` file per selected page and returns the written paths in page order. Default generated filenames should be stable and human-readable, using 1-based visible page numbers, for example:
 

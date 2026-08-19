@@ -8,19 +8,26 @@
 
 ```python
 analyze_bytes(data: bytes) -> DocumentInfo
-to_pdf_bytes(data: bytes, *, page_index: int | None = None) -> bytes
-to_pdf_file(input_path, output_path=None, *, page_index=None, overwrite=False) -> Path
+to_pdf_bytes(data: bytes, *, page_index: int | None = None, omit_header_footer: bool = False) -> bytes
+to_pdf_file(input_path, output_path=None, *, page_index=None, omit_header_footer=False, overwrite=False) -> Path
 ```
 
 현재 Rust MVP shape는 다음과 같다.
 
 ```rust
+pub struct ConvertOptions {
+    pub page_index: Option<u32>,
+    pub omit_header_footer: bool,
+}
+
 analyze_hwp_bytes(data: &[u8])
 hwp_to_pdf_bytes(data: &[u8], options: ConvertOptions)
 hwp_file_to_pdf_file(input_path, output_path, options)
 ```
 
 이 API들은 오늘 구현된 MVP surface다. `page_index`는 upstream native API와 같은 0-based page index다. `None`이면 전체 문서를 대상으로 한다. Python facade는 경로 정규화와 overwrite policy를 담당하고, Rust engine은 전달받은 data/path/options로 분석과 산출을 수행한다.
+
+`omit_header_footer`는 render-only 옵션으로, HWP 머리말/꼬리말 content를 SVG/PDF render output에서 생략하지만 body content를 reflow하거나 standalone page number와 page selection semantics를 바꾸지 않는다.
 
 미래 batch API와 semantic API는 Rust engine crate에서 먼저 설계하고 구현한 뒤 PyO3 wrapper와 Python facade/stub으로 올라와야 한다. 현재 구현 위치는 `hwp-ingest`다. `rhwp` 고유 구조는 `hwp-ingest-rhwp-adapter`가 흡수한다. Python-only 확장으로 Rust engine이 생산하지 않는 semantic contract를 만들지 않는다.
 

@@ -2,6 +2,20 @@
 
 This file records hwp-ingest-local changes applied after the recorded upstream import because vendor/rhwp-subset is a surgical source subset and does not carry upstream git history. Keep one reverse-chronological entry per hwp-ingest commit that changes upstream-derived source files.
 
+## 2026-07-09 — render option for header/footer omission
+
+Status: hwp-ingest-local render option; removable if upstream exposes an equivalent transient render option.
+
+Scope: vendor/rhwp-subset transient render compatibility options and SVG render tree/cache handling used by hwp-ingest conversion policy; product adapter/core/Python API policy remains outside the vendored tree.
+
+Problem: hwp-ingest needs a render-only conversion option that omits HWP Header/Footer control content, including images inside those controls, without changing document semantics, section/page-hide state, page layout, page count, master pages, borders/fill, or standalone page numbers.
+
+Behavior: `RenderCompatibilityOptions::omit_header_footer` defaults to `false` for both `RHWP_NATIVE` and `HANCOM_RENDER_COMPATIBILITY`. When enabled for a render call, header/footer render tree emission is skipped and option-scoped SVG rendering invalidates the page tree cache before and after temporary option changes.
+
+Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/renderer/compat.rs`, `src/renderer/layout.rs`, and `src/document_core/queries/rendering.rs`.
+
+Upstream sync: Default rhwp/native behavior remains unchanged; remove this local option only when upstream provides an equivalent non-mutating, transient render option for Header/Footer omission.
+
 ## 2026-07-07 — TAC BehindText table flow reservation
 
 Status: hwp-ingest-local renderer compatibility fix; upstream contribution candidate.
