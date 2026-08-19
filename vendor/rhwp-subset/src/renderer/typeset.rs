@@ -10210,18 +10210,40 @@ impl TypesetEngine {
         // mismatch (= 21_언어 page 1 col 0 의 +76 px drift). 본문 좌표계와 동기화 하기
         // 위해 host paragraph 의 first_vpos 만큼 cur_h 를 미리 jump 하고 표 advance 를
         // 본문 라인 만큼으로 축소.
+        // [Task #1994 backport] Paper(용지)-앵커 부동 표는 절대 좌표로 그려지므로 flow 를
+        // 소비하지 않고 절대 배치해야 한다. 기존에는 자리차지(TopAndBottom)만 이 경로를
+        // 탔으나, 글뒤로/글앞으로(BehindText/InFrontOfText) Paper-앵커 표도 동일하게
+        // 절대 배치 대상이다. 특히 다행(多行) 글뒤로 Paper-앵커 표가 이 경로를 놓치면
+        // 아래 RowBreak 분할 경로로 빠져 흐름 상단에 여러 페이지로 조각 배치되어 앞선
+        // 글뒤로 표와 겹친다(upstream rhwp Issue #1994).
         use crate::model::shape::{TextWrap, VertRelTo};
-        let is_paper_topbottom_block = !table.common.treat_as_char
-            && matches!(table.common.text_wrap, TextWrap::TopAndBottom)
+        let is_paper_floating_block = !table.common.treat_as_char
+            && matches!(
+                table.common.text_wrap,
+                TextWrap::TopAndBottom | TextWrap::BehindText | TextWrap::InFrontOfText
+            )
             && matches!(table.common.vert_rel_to, VertRelTo::Paper);
-        if is_paper_topbottom_block && st.current_column == 0 {
+        // 글뒤로/글앞으로는 본문 위/아래에 겹쳐 그려지며 본문 텍스트를 밀어내지 않는다
+        // (자리차지와 달리 current_height sync 로 후속 흐름을 끌어내리면 안 됨).
+        let is_paper_behind_infront = !table.common.treat_as_char
+            && matches!(
+                table.common.text_wrap,
+                TextWrap::BehindText | TextWrap::InFrontOfText
+            )
+            && matches!(table.common.vert_rel_to, VertRelTo::Paper);
+        if is_paper_floating_block && st.current_column == 0 {
             if let Some(first_seg) = para.line_segs.first() {
                 let target_y =
                     crate::renderer::hwpunit_to_px(first_seg.vertical_pos as i32, self.dpi);
                 // 호스트 본문 lines + 표는 절대 좌표 → cur_h 는 first_vpos + host lines 만 진행.
                 let pre_lines_h = fmt.line_advances_sum(0..fmt.line_heights.len());
-                if target_y > st.current_height && target_y + pre_lines_h <= available {
-                    st.current_height = target_y;
+                let can_sync = target_y > st.current_height && target_y + pre_lines_h <= available;
+                // 글뒤로/글앞으로는 sync 없이도 절대배치(0 flow)한다 — RowBreak 분할·flow
+                // 배치를 막아 절대 좌표(vert=용지)에 통째로 그려지게 한다.
+                if can_sync || is_paper_behind_infront {
+                    if can_sync && !is_paper_behind_infront {
+                        st.current_height = target_y;
+                    }
                     // table_total = 0: 표 자체는 cur_h advance 에 영향 없음 (Paper-absolute).
                     // 호스트 본문 lines 만 place_table_with_text 가 pre_height 로 추가.
                     self.place_table_with_text(
@@ -12352,6 +12374,132 @@ mod tests {
         assert!(
             table_pos < following_pos,
             "following paragraph must paginate after the TAC BehindText table"
+        );
+    }
+
+    /// [Task #1994 backport] Paper-anchored non-TAC BehindText/InFrontOfText 표는
+    /// 절대 좌표(vert=용지)로 그려지므로 흐름을 소비하지 않고 통째로 배치되어야
+    /// 한다. 결함 시 이런 표가 RowBreak 흐름-분할 경로로 빠져 절대 Y 를 무시한
+    /// 채 여러 페이지에 걸쳐 PartialTable 로 조각난다 — 앞선 글뒤로 표와 겹치는
+    /// 원인. 표 측정 높이(1600px)가 A4 한 페이지보다 훨씬 크므로, 분할 없이
+    /// 단일 PageItem::Table 로 배치되는지 검증한다.
+    #[test]
+    fn test_typeset_paper_anchored_behindtext_table_placed_absolutely() {
+        use crate::model::control::Control;
+        use crate::model::shape::{HorzRelTo, TextWrap, VertRelTo};
+        use crate::model::table::{Cell, Table};
+
+        let engine = TypesetEngine::with_default_dpi();
+        let paginator = Paginator::with_default_dpi();
+        let styles = ResolvedStyleSet::default();
+        let page_def = a4_page_def();
+        let col_def = ColumnDef::default();
+        let composed: Vec<ComposedParagraph> = Vec::new();
+
+        let mut table = Table {
+            row_count: 3,
+            col_count: 1,
+            cells: vec![
+                Cell {
+                    col: 0,
+                    row: 0,
+                    col_span: 1,
+                    row_span: 1,
+                    width: 46944,
+                    height: 40000,
+                    paragraphs: vec![Paragraph::default()],
+                    ..Default::default()
+                },
+                Cell {
+                    col: 0,
+                    row: 1,
+                    col_span: 1,
+                    row_span: 1,
+                    width: 46944,
+                    height: 40000,
+                    paragraphs: vec![Paragraph::default()],
+                    ..Default::default()
+                },
+                Cell {
+                    col: 0,
+                    row: 2,
+                    col_span: 1,
+                    row_span: 1,
+                    width: 46944,
+                    height: 40000,
+                    paragraphs: vec![Paragraph::default()],
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        // non-TAC, Paper 앵커, BehindText, horz != Paper (paper_anchored_overlay_table
+        // 단축분기를 피해 oversized_multirow 경로로 진입시키는 조합).
+        table.common.treat_as_char = false;
+        table.common.text_wrap = TextWrap::BehindText;
+        table.common.vert_rel_to = VertRelTo::Paper;
+        table.common.horz_rel_to = HorzRelTo::Para;
+        table.common.width = 46944;
+        table.common.height = 120000;
+
+        let table_para = Paragraph {
+            line_segs: vec![LineSeg {
+                vertical_pos: 20000,
+                line_height: 1400,
+                text_height: 1400,
+                line_spacing: 1332,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            }],
+            controls: vec![Control::Table(Box::new(table))],
+            ..Default::default()
+        };
+        let paras = vec![table_para];
+
+        let (_paginator_result, measured) =
+            paginator.paginate(&paras, &composed, &styles, &page_def, &col_def, 0);
+        let typeset_result = engine.typeset_section(
+            &paras,
+            &composed,
+            &styles,
+            &page_def,
+            &col_def,
+            0,
+            &measured.tables,
+            false,
+            &std::collections::HashSet::new(),
+        );
+        let items: Vec<_> = typeset_result
+            .pages
+            .iter()
+            .flat_map(|page| page.column_contents.iter())
+            .flat_map(|col| col.items.iter())
+            .collect();
+
+        assert!(
+            !items
+                .iter()
+                .any(|item| matches!(item, PageItem::PartialTable { .. })),
+            "Paper-anchored BehindText table must not be RowBreak-split into PartialTable \
+             fragments: items={items:?}"
+        );
+        let table_items: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    PageItem::Table {
+                        para_index: 0,
+                        control_index: 0
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(
+            table_items.len(),
+            1,
+            "Paper-anchored BehindText table must be placed as a single whole item: items={items:?}"
         );
     }
 }

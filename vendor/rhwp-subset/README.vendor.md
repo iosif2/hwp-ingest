@@ -38,6 +38,7 @@ Some `LOCAL_CHANGES.md` entries are not hwp-ingest-local inventions but selectiv
 Backported so far:
 
 - `e893b65d9` (upstream Task #2220) — TAC host line `outer_margin` double-counting fix in `src/renderer/layout.rs`.
+- `c5f6f7278`/`a11997ea4` (upstream Issue #1994) — Paper-anchored BehindText/InFrontOfText table absolute placement in `src/renderer/typeset.rs`, adapted (not cherry-picked) because this subset's baseline predates the upstream Task #1858 refactor that commit's neighborhood depends on.
 
 ## Sync rule
 

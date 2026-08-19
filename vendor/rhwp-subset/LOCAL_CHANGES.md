@@ -2,6 +2,22 @@
 
 This file records hwp-ingest-local changes applied after the recorded upstream import because vendor/rhwp-subset is a surgical source subset and does not carry upstream git history. Keep one reverse-chronological entry per hwp-ingest commit that changes upstream-derived source files.
 
+## 2026-08-19 — Paper-anchored BehindText/InFrontOfText table absolute placement (upstream backport, adapted)
+
+Status: selective upstream backport, adapted to this subset's baseline; not a local invention. Ports the intent of upstream commit `c5f6f7278` (upstream Issue #1994), reimplemented against this subset's simpler pre-#1858 gate (see Root cause) rather than cherry-picked verbatim.
+
+Scope: vendor/rhwp-subset TAC/non-TAC table placement classification in the typeset pagination path used by hwp-ingest conversion; product adapter/core/Python API policy remains outside the vendored tree.
+
+Problem: A non-treat-as-char, Paper-anchored table with BehindText or InFrontOfText wrapping (drawn at an absolute page position, e.g. a full-page schedule table anchored `vert=Paper`) was not recognized by the existing Paper-anchored absolute-placement gate, which only covered TopAndBottom wrapping. When such a table's measured height exceeded the available page space (a common case for full-page decorative/background tables), it fell through to the RowBreak flow-splitting path, ignored its absolute Y position, and was fragmented into multiple `PartialTable` pages — overlapping any earlier BehindText table on the same page instead of stacking after it.
+
+Root cause: `TypesetEngine::typeset_block_table`'s Paper-anchored absolute-placement gate (`is_paper_topbottom_block`) matched only `TextWrap::TopAndBottom`. Upstream's later commit `c5f6f7278` extends this gate as part of a larger refactor (upstream Task #1858's `can_sync`/`has_preceding_paper_float` handling and a 10-argument `place_table_with_text`) that postdates this subset's baseline; only the gate-extension intent was ported, adapted to this subset's simpler (9-argument) `place_table_with_text` and single-condition gate.
+
+Behavior: The gate (`is_paper_floating_block`) now also matches `BehindText`/`InFrontOfText`. Unlike TopAndBottom (which still syncs `current_height` to the table's stored vertical position when possible), BehindText/InFrontOfText tables are placed absolutely with zero flow advance unconditionally (no `current_height` sync, since these decorate over/under body text rather than push it), preventing RowBreak fragmentation regardless of page-fit. The existing TopAndBottom sync path is unchanged.
+
+Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/renderer/typeset.rs`.
+
+Upstream sync: Remove this local patch once the vendor baseline is resynced to a commit that includes upstream `c5f6f7278`/`a11997ea4` or a later equivalent fix.
+
 ## 2026-08-19 — TAC host line outer_margin double-counting fix (upstream backport)
 
 Status: selective upstream backport, adapted to this subset's baseline; not a local invention. Ports upstream commit `e893b65d9` (upstream Task #2220).
