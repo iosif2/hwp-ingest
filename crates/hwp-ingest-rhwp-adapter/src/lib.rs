@@ -2,6 +2,7 @@ pub mod layout;
 pub mod parse;
 pub(crate) mod pdf_backend;
 pub mod render;
+pub mod text;
 
 pub use layout::DocumentLayoutInfo;
 pub use parse::{analyze_hwp_bytes, parse_hwp_bytes};

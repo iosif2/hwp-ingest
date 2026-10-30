@@ -1487,6 +1487,31 @@ impl DocumentCore {
         result
     }
 
+    /// Extracts the text of one page with transient render compatibility options.
+    ///
+    /// Mirrors `render_page_svg_native_with_compat`: the options only apply to this call, so the
+    /// page text follows the same header/footer handling as the SVG/PDF pages of the same
+    /// conversion policy, and the engine state is restored afterwards.
+    pub fn extract_page_text_native_with_compat(
+        &self,
+        page_num: u32,
+        options: crate::renderer::compat::RenderCompatibilityOptions,
+    ) -> Result<String, HwpError> {
+        let previous = self.layout_engine.render_compatibility_options();
+        let options_changed = options != previous;
+        if options_changed {
+            self.invalidate_page_tree_cache();
+        }
+        self.layout_engine.set_render_compatibility_options(options);
+        let result = self.extract_page_text_native(page_num);
+        self.layout_engine
+            .set_render_compatibility_options(previous);
+        if options_changed {
+            self.invalidate_page_tree_cache();
+        }
+        result
+    }
+
     /// Production SVG entry point. Screen-profile paint decisions are built once in
     /// `PageLayerTree` and replayed by the SVG backend, matching the Studio renderer boundary.
     pub fn render_page_svg_native(&self, page_num: u32) -> Result<String, HwpError> {

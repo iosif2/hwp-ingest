@@ -2,6 +2,20 @@
 
 This file records hwp-ingest-local changes applied after the recorded upstream import because vendor/rhwp-subset is a surgical source subset and does not carry upstream git history. Keep one reverse-chronological entry per hwp-ingest commit that changes upstream-derived source files.
 
+## 2026-10-30 — page text extraction with transient render options
+
+Status: hwp-ingest-local wrapper; removable if upstream exposes an equivalent transient option for text extraction.
+
+Scope: `vendor/rhwp-subset/src/document_core/queries/rendering.rs` only, plus one unit test in `src/wasm_api/tests.rs`. Adapter, engine, and Python policy stay outside the vendored tree.
+
+Problem: hwp-ingest's page text API must follow the same header/footer handling as its SVG/PDF conversion (`omit_header_footer`). Upstream `extract_page_text_native` reads the page render tree under whatever options the layout engine currently holds, and the existing `*_with_compat` pattern only wraps the SVG entry point.
+
+Behavior: `DocumentCore::extract_page_text_native_with_compat(page, options)` sets the render compatibility options, invalidates the page tree cache when they change, calls `extract_page_text_native`, then restores the previous options and cache state, exactly like `render_page_svg_native_with_compat`. Default behavior of every existing entry point is unchanged.
+
+Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/document_core/queries/rendering.rs`, `src/wasm_api/tests.rs`.
+
+Upstream sync: Remove this wrapper if upstream gains an equivalent non-mutating option for page text extraction, or fold it into the compat wrapper if `render_page_svg_native_with_compat` is replaced.
+
 ## 2026-10-30 — v0.8.7 resync: local patch inventory
 
 Status: current hwp-ingest-local delta against unmodified upstream v0.8.7 (`1a76570e833917d15817415a53c09ad61ab3203f`). Production changes are about 90 lines plus `src/renderer/compat.rs`; everything else in this tree is upstream.
@@ -10,6 +24,7 @@ Retained (re-applied by hand onto the v0.8.7 layout, which was restructured sinc
 
 1. Hancom render compatibility shim — `src/renderer/compat.rs` (new), `LayoutEngine::{set_,}render_compatibility_options` and body-table clamp in `src/renderer/layout.rs`, `compute_table_y_position` clamp and `body_flow_context` plumbing in `src/renderer/layout/table_layout.rs`, `render_page_svg_native_with_compat` in `src/document_core/queries/rendering.rs` and `src/wasm_api.rs`, `pub mod compat` in `src/renderer/mod.rs`, and the CommonObjAttr flags write in `src/document_core/commands/table_ops.rs`. Also keeps the early `current_paper_width`/`current_body_area` set-and-restore in `build_render_tree`, so `is_body_flow_col_area` never reads the previous page's body area while headers/footers are laid out.
 2. `RenderCompatibilityOptions::omit_header_footer` — header/footer omission in `build_render_tree` (`src/renderer/layout.rs`).
+   Also used by the page text wrapper `extract_page_text_native_with_compat` (see the 2026-10-30 page text entry above).
 3. Paginator TAC remnant — `pre_table_end_line` in `src/renderer/pagination/engine.rs` no longer forces host text before a treat-as-char table when `vertical_offset > 0`.
 4. Local regression tests for the above in `src/renderer/layout/tests.rs`, `src/renderer/pagination/tests.rs`, and `src/wasm_api/tests.rs`, plus unit tests in `compat.rs`.
 

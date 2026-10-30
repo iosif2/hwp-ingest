@@ -35,7 +35,7 @@ Other repository samples, web extension packages, studio apps, generated PDFs, u
 
 Each import commit preserves upstream source files without modification. Follow-up hwp-ingest-local source patches are tracked in `LOCAL_CHANGES.md`. hwp-ingest adapter, PyO3 binding, and Python facade code live outside `vendor/rhwp-subset`.
 
-Current hwp-ingest-local parser/layout/render compatibility patches (Hancom render compatibility shim, header/footer omission option, Paginator TAC remnant) and the manifest adaptation are recorded in LOCAL_CHANGES.md and must be reviewed during upstream sync.
+Current hwp-ingest-local parser/layout/render compatibility patches (Hancom render compatibility shim, header/footer omission option, Paginator TAC remnant, page text extraction wrapper) and the manifest adaptation are recorded in LOCAL_CHANGES.md and must be reviewed during upstream sync.
 
 ## Selective upstream backports
 

@@ -27,6 +27,55 @@ fn render_page_svg_native_with_compat_returns_svg_for_empty_document() {
     );
 }
 
+#[test]
+fn extract_page_text_native_with_compat_can_omit_header_footer() {
+    use crate::renderer::compat::RenderCompatibilityOptions;
+
+    let mut doc = HwpDocument::create_empty();
+    doc.create_blank_document_native()
+        .expect("blank template should load");
+    doc.insert_text(0, 0, 2, "BODY_SENTINEL")
+        .expect("body text should insert");
+    doc.create_header_footer(0, true, 0)
+        .expect("header should be created");
+    doc.insert_text_in_header_footer(0, true, 0, 0, 0, "HEADER_SENTINEL")
+        .expect("header text should insert");
+    doc.create_header_footer(0, false, 0)
+        .expect("footer should be created");
+    doc.insert_text_in_header_footer(0, false, 0, 0, 0, "FOOTER_SENTINEL")
+        .expect("footer text should insert");
+
+    let included = doc
+        .core
+        .extract_page_text_native_with_compat(
+            0,
+            RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY,
+        )
+        .expect("page text should extract");
+    assert!(included.contains("BODY_SENTINEL"));
+    assert!(included.contains("HEADER_SENTINEL"));
+    assert!(included.contains("FOOTER_SENTINEL"));
+
+    let omitted = doc
+        .core
+        .extract_page_text_native_with_compat(
+            0,
+            RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY.with_omit_header_footer(true),
+        )
+        .expect("page text should extract with header/footer omitted");
+    assert!(omitted.contains("BODY_SENTINEL"));
+    assert!(!omitted.contains("HEADER_SENTINEL"));
+    assert!(!omitted.contains("FOOTER_SENTINEL"));
+
+    // The options are transient: the next plain call sees header/footer again.
+    let restored = doc
+        .core
+        .extract_page_text_native(0)
+        .expect("plain page text should still extract");
+    assert!(restored.contains("HEADER_SENTINEL"));
+    assert!(restored.contains("FOOTER_SENTINEL"));
+}
+
 /// [#1386] createEmpty는 구역 1개 + 빈 문단 1개를 포함해 생성 직후
 /// 편집/조회/내보내기가 가능해야 한다 (구역 0개 → 모든 API 실패 회귀 방지).
 #[test]
