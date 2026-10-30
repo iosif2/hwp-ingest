@@ -8,24 +8,16 @@ use super::byte_reader::ByteReader;
 use super::record::Record;
 use super::tags;
 
-use std::collections::HashMap;
-
 use crate::model::control::{
     AutoNumber, AutoNumberType, Bookmark, CharOverlap, Control, Equation, Field, FieldType,
-    FormObject, FormType, HiddenComment, NewNumber, PageHide, PageNumberPos, UnknownControl,
+    FormObject, FormType, HiddenComment, IndexMark, NewNumber, PageHide, PageNumCtrl,
+    PageNumberPos, PageStartsOn, UnknownControl,
 };
 use crate::model::footnote::{Endnote, Footnote};
 use crate::model::header_footer::{Footer, Header, HeaderFooterApply};
-use crate::model::image::{ImageEffect, Picture};
-use crate::model::shape::{
-    ArcShape, Caption, CaptionDirection, CaptionVertAlign, CommonObjAttr, CurveShape,
-    DrawingObjAttr, EllipseShape, GroupShape, HorzAlign, HorzRelTo, LineShape, PolygonShape,
-    RectangleShape, ShapeComponentAttr, ShapeObject, TextWrap, VertAlign, VertRelTo,
-};
-use crate::model::style::{Fill, ShapeBorderLine};
+use crate::model::shape::{Caption, CaptionDirection, CaptionVertAlign};
 use crate::model::table::{Cell, Table, TablePageBreak, VerticalAlign};
 use crate::model::Padding;
-use crate::model::Point;
 
 /// ctrl_id 기반으로 컨트롤 파싱
 ///
@@ -44,6 +36,10 @@ pub fn parse_control(ctrl_id: u32, ctrl_data: &[u8], child_records: &[Record]) -
         tags::CTRL_PAGE_NUM_POS => parse_page_num_pos(ctrl_data),
         tags::CTRL_PAGE_HIDE => parse_page_hide(ctrl_data),
         tags::CTRL_BOOKMARK => parse_bookmark(ctrl_data),
+        tags::CTRL_INDEX_MARK => parse_index_mark(ctrl_data),
+        tags::CTRL_PAGE_NUM_CTRL => parse_page_num_ctrl(ctrl_data),
+        // [#4397] 'tdut'(덧말) — 상수 이름과 달리 CTRL_CHAR_OVERLAP 이 'tdut' 다.
+        tags::CTRL_CHAR_OVERLAP => parse_ruby(ctrl_data),
         tags::CTRL_TCPS => parse_char_overlap(ctrl_data),
         tags::CTRL_EQUATION => parse_equation_control(ctrl_data, child_records),
         tags::CTRL_FORM => parse_form_control(ctrl_data, child_records),
@@ -130,10 +126,18 @@ fn parse_field_control(ctrl_id: u32, ctrl_data: &[u8]) -> Control {
         extra_properties,
         field_id,
         ctrl_id,
+        instance_id: None,
+        // [#4896] HWP5 는 ctrl_id 자체가 종류라 원문 문자열이 없다 — 직렬화기가
+        // `tags::OWPML_EXTRA_FIELD_TYPES` 로 ctrl_id 에서 이름을 되찾는다.
+        raw_type: None,
         ctrl_data_name: None,
         memo_index,
         memo_paragraphs: Vec::new(),
+        memo_text_direction: None,
         raw_parameters_xml: None,
+        parameters: Default::default(),
+        guide_residue: None,
+        hyperlink_format: None,
     })
 }
 
@@ -163,9 +167,18 @@ fn parse_table_control(ctrl_data: &[u8], child_records: &[Record]) -> Control {
     }
 
     // HWPTAG_TABLE 레코드 위치 찾기
+    //
+    // [#3528] **직계 자식 레벨**의 것만 본다. 종전에는 첫 HWPTAG_TABLE 을 그냥 집었는데,
+    // 캡션 문단 안에 표가 들어 있으면 그 표가 자기 HWPTAG_TABLE 을 더 앞에 방출한다
+    // (저장 순서: CTRL_TABLE → 캡션 → HWPTAG_TABLE → 셀). 그러면 캡션 범위가 거기서
+    // 끊겨 캡션 문단이 잘리고, 그 안의 표도 얕게 읽힌다.
+    //
+    // 직계 자식은 모두 CTRL_HEADER 바로 아래 레벨이므로(캡션 LIST_HEADER·HWPTAG_TABLE·
+    // 셀 LIST_HEADER 가 같은 레벨), 자식 레코드의 최소 레벨이 곧 직계 레벨이다.
+    let direct_level = child_records.iter().map(|r| r.level).min();
     let table_record_idx = child_records
         .iter()
-        .position(|r| r.tag_id == tags::HWPTAG_TABLE);
+        .position(|r| r.tag_id == tags::HWPTAG_TABLE && Some(r.level) == direct_level);
 
     // HWPTAG_TABLE 이전에 LIST_HEADER가 있으면 캡션
     if let Some(table_idx) = table_record_idx {
@@ -331,6 +344,9 @@ fn parse_cell(records: &[Record]) -> Cell {
     // bit 19~20: 줄바꿈 방식
     // bit 21~22: 세로 정렬 (0=top, 1=center, 2=bottom)
     cell.text_direction = ((list_attr >> 16) & 0x07) as u8;
+    // [#4898] 줄바꿈 방식(bit 19~20)도 싣는다 — 종전엔 읽지 않아 저장에서 0(BREAK)으로
+    // 굳었고, SQUEEZE 셀의 줄 수·높이가 달라져 한글 쪽수까지 흔들렸다.
+    cell.line_wrap = ((list_attr >> 19) & 0x03) as u8;
     let v_align = ((list_attr >> 21) & 0x03) as u8;
     cell.vertical_align = match v_align {
         1 => VerticalAlign::Center,
@@ -350,8 +366,11 @@ fn parse_cell(records: &[Record]) -> Cell {
     // 셀 속성 (표 82: 26바이트)
     cell.col = r.read_u16().unwrap_or(0);
     cell.row = r.read_u16().unwrap_or(0);
-    cell.col_span = r.read_u16().unwrap_or(1);
-    cell.row_span = r.read_u16().unwrap_or(1);
+    // 손상된 문서는 colSpan/rowSpan에 0을 기록할 수 있다. HWPX/HWP3 파서는
+    // 이미 .max(1)로 최소 1을 보장하므로 HWP5도 동일하게 정규화한다
+    // (0이면 이후 병합/렌더링 로직의 `row + row_span - 1` 계산이 언더플로한다).
+    cell.col_span = r.read_u16().unwrap_or(1).max(1);
+    cell.row_span = r.read_u16().unwrap_or(1).max(1);
     cell.width = r.read_u32().unwrap_or(0);
     cell.height = r.read_u32().unwrap_or(0);
 
@@ -377,7 +396,7 @@ fn parse_cell(records: &[Record]) -> Cell {
     // 34바이트 이후 추가 데이터 보존 (라운드트립용)
     if r.remaining() > 0 {
         cell.raw_list_extra = r.read_bytes(r.remaining()).unwrap_or_default();
-        // 셀 필드명 추출: raw_list_extra offset 14-15(name_len) + 16~(UTF-16LE)
+        // 셀 필드명 추출: raw_list_extra offset 15..17(name_len) + 17..(UTF-16LE)
         cell.field_name = parse_cell_field_name(&cell.raw_list_extra);
     }
 
@@ -388,8 +407,9 @@ fn parse_cell(records: &[Record]) -> Cell {
 }
 
 /// 셀의 raw_list_extra에서 필드 이름을 추출한다.
-/// 구조: raw_list_extra[14..16] = name_len (u16), [16..16+name_len*2] = UTF-16LE 문자열
-fn parse_cell_field_name(extra: &[u8]) -> Option<String> {
+/// 구조: raw_list_extra[15..17] = name_len (u16 LE), [17..17+name_len*2] = UTF-16LE 문자열
+/// (직렬화 대칭: serializer::control::build_cell_list_extra — #1808)
+pub(crate) fn parse_cell_field_name(extra: &[u8]) -> Option<String> {
     if extra.len() < 18 {
         return None;
     }
@@ -486,7 +506,13 @@ fn parse_header_control(ctrl_data: &[u8], child_records: &[Record]) -> Control {
         }
     }
 
-    header.paragraphs = find_list_header_paragraphs(child_records);
+    let (layout, paragraphs) = find_list_header_layout_and_paragraphs(child_records);
+    header.list_attr = layout.list_attr;
+    header.text_width = layout.text_width;
+    header.text_height = layout.text_height;
+    header.text_ref = layout.text_ref;
+    header.num_ref = layout.num_ref;
+    header.paragraphs = paragraphs;
 
     Control::Header(Box::new(header))
 }
@@ -510,7 +536,13 @@ fn parse_footer_control(ctrl_data: &[u8], child_records: &[Record]) -> Control {
         }
     }
 
-    footer.paragraphs = find_list_header_paragraphs(child_records);
+    let (layout, paragraphs) = find_list_header_layout_and_paragraphs(child_records);
+    footer.list_attr = layout.list_attr;
+    footer.text_width = layout.text_width;
+    footer.text_height = layout.text_height;
+    footer.text_ref = layout.text_ref;
+    footer.num_ref = layout.num_ref;
+    footer.paragraphs = paragraphs;
 
     Control::Footer(Box::new(footer))
 }
@@ -611,6 +643,10 @@ fn parse_auto_number(ctrl_data: &[u8]) -> Control {
             3 => AutoNumberType::Picture,
             4 => AutoNumberType::Table,
             5 => AutoNumberType::Equation,
+            // 6 = 총 쪽수 ('전체 쪽 번호' 필드). exam_eng.hwp 실측: 꼬리말 쪽번호 상자의
+            // 두 번째 atno가 attr&0x0F=6 으로 인코딩됨. 과거엔 fallback으로 Page 취급되어
+            // 현재 쪽번호가 두 번 표시되는 버그가 있었다.
+            6 => AutoNumberType::TotalPage,
             _ => AutoNumberType::Page,
         };
         an.format = ((attr >> 4) & 0xFF) as u8; // bit 4~11: 번호 모양 (표 134)
@@ -637,6 +673,7 @@ fn parse_new_number(ctrl_data: &[u8]) -> Control {
             3 => AutoNumberType::Picture,
             4 => AutoNumberType::Table,
             5 => AutoNumberType::Equation,
+            6 => AutoNumberType::TotalPage,
             _ => AutoNumberType::Page,
         };
         nn.number = r.read_u16().unwrap_or(0);
@@ -689,6 +726,42 @@ fn parse_bookmark(ctrl_data: &[u8]) -> Control {
     Control::Bookmark(bm)
 }
 
+/// 쪽 번호 시작 쪽 파싱 ('pgct')
+///
+/// ctrl_data 는 `u32` 하나다(실측 11문서·102건 전부 8바이트 CTRL_HEADER).
+fn parse_page_num_ctrl(ctrl_data: &[u8]) -> Control {
+    let raw = if ctrl_data.len() >= 4 {
+        u32::from_le_bytes([ctrl_data[0], ctrl_data[1], ctrl_data[2], ctrl_data[3]])
+    } else {
+        0
+    };
+    Control::PageNumCtrl(PageNumCtrl {
+        page_starts_on: PageStartsOn::from_hwp5(raw),
+    })
+}
+
+/// 찾아보기 표식 파싱 ('idxm')
+///
+/// ctrl_data 레이아웃 (ctrl_id 4바이트는 이미 제거된 상태) — 실측 06926:
+///   WORD(2) + WCHAR[n]  첫째 키
+///   WORD(2) + WCHAR[m]  둘째 키
+///   4바이트 예약(전부 0)
+///
+/// arm 이 없으면 `Control::Unknown` 이 되는데, 그러면 HWPX 저장기가 슬롯으로는
+/// 세어 놓고 XML 은 내지 않아 문단 축이 8유닛 짧아진다 — 한글은 범위를 넘는
+/// `textpos` 를 만나면 파일을 아예 열지 못한다.
+fn parse_index_mark(ctrl_data: &[u8]) -> Control {
+    let mut im = IndexMark::default();
+    let mut r = ByteReader::new(ctrl_data);
+    if let Ok(first) = r.read_hwp_string() {
+        im.first_key = first;
+    }
+    if let Ok(second) = r.read_hwp_string() {
+        im.second_key = second;
+    }
+    Control::IndexMark(im)
+}
+
 /// 글자 겹침 파싱 (HWP 스펙 표 152)
 ///
 /// ctrl_data 레이아웃 (ctrl_id 4바이트는 이미 제거된 상태):
@@ -699,6 +772,25 @@ fn parse_bookmark(ctrl_data: &[u8]) -> Control {
 ///   UINT8(1): 펼침
 ///   UINT8(1): charshape 아이디 수(cnt)
 ///   UINT[cnt](4×cnt): charshape_id 배열
+/// [#4397] 덧말('tdut') CTRL_HEADER payload 파싱 — HWP5 스펙 표 151.
+///
+/// `mainText`(HWP string) + `subText`(HWP string) + 덧말 위치/Fsizeratio/Option/
+/// Style number/정렬 (UINT32 ×5). 종전에는 arm 이 없어 `Control::Unknown` 으로
+/// 떨어졌고, HWPX→HWP5 저장도 최소 CTRL_HEADER(짝 맞춤, #4677)만 내 내용이
+/// 통째로 소실됐다 — 저장측(serialize_control)과 함께 양방향을 잇는다.
+fn parse_ruby(ctrl_data: &[u8]) -> Control {
+    let mut ruby = crate::model::control::Ruby::default();
+    let mut r = ByteReader::new(ctrl_data);
+    ruby.main_text = r.read_hwp_string().unwrap_or_default();
+    ruby.ruby_text = r.read_hwp_string().unwrap_or_default();
+    ruby.pos_type = r.read_u32().unwrap_or(0) as u8;
+    ruby.sz_ratio = r.read_u32().unwrap_or(0) as u8;
+    ruby.option = r.read_u32().unwrap_or(0);
+    ruby.style_id_ref = r.read_u32().unwrap_or(0) as u16;
+    ruby.align = r.read_u32().unwrap_or(0) as u8;
+    Control::Ruby(ruby)
+}
+
 fn parse_char_overlap(ctrl_data: &[u8]) -> Control {
     let mut co = CharOverlap::default();
     if ctrl_data.len() < 2 {
@@ -775,6 +867,55 @@ fn find_list_header_paragraphs(
     Vec::new()
 }
 
+/// 머리말/꼬리말 LIST_HEADER 레코드 페이로드.
+///
+/// [#2648] `find_list_header_paragraphs` 는 레코드 뒤의 문단만 파싱하고 레코드
+/// 자체의 페이로드(list_attr/text_width/text_height/text_ref/num_ref)는 읽지
+/// 않았다. 직렬화(`build_header_footer_list_header`, serializer/control.rs)는
+/// 이 값들을 무조건 사용하므로 저장 왕복마다 0 으로 뭉개졌다. 바이트 레이아웃은
+/// 그 직렬화 함수의 역이다:
+/// u16 para_count | u32 list_attr | u16(예약) | u32 text_width | u32 text_height
+/// | u8 text_ref | u8 num_ref | u16 ext_flags | [u8;14] 예약
+struct HeaderFooterListLayoutFields {
+    list_attr: u32,
+    text_width: u32,
+    text_height: u32,
+    text_ref: u8,
+    num_ref: u8,
+}
+
+fn find_list_header_layout_and_paragraphs(
+    child_records: &[Record],
+) -> (
+    HeaderFooterListLayoutFields,
+    Vec<crate::model::paragraph::Paragraph>,
+) {
+    let mut layout = HeaderFooterListLayoutFields {
+        list_attr: 0,
+        text_width: 0,
+        text_height: 0,
+        text_ref: 0,
+        num_ref: 0,
+    };
+    let mut idx = 0;
+    while idx < child_records.len() {
+        if child_records[idx].tag_id == tags::HWPTAG_LIST_HEADER {
+            let mut r = ByteReader::new(&child_records[idx].data);
+            let _para_count = r.read_u16().unwrap_or(0);
+            layout.list_attr = r.read_u32().unwrap_or(0);
+            let _reserved = r.read_u16().unwrap_or(0);
+            layout.text_width = r.read_u32().unwrap_or(0);
+            layout.text_height = r.read_u32().unwrap_or(0);
+            layout.text_ref = r.read_u8().unwrap_or(0);
+            layout.num_ref = r.read_u8().unwrap_or(0);
+            let paragraphs = parse_paragraph_list(&child_records[idx + 1..]);
+            return (layout, paragraphs);
+        }
+        idx += 1;
+    }
+    (layout, Vec::new())
+}
+
 // ============================================================
 // 수식 ('eqed')
 // ============================================================
@@ -800,8 +941,11 @@ fn parse_equation_control(ctrl_data: &[u8], child_records: &[Record]) -> Control
         let data = &eq_rec.data;
         let mut r = ByteReader::new(data);
 
-        // attr: u32 (4바이트) — bit0: 스크립트 범위
-        let _attr = r.read_u32().unwrap_or(0);
+        // attr: u32 (4바이트) — bit0: lineMode (0=글자단위/CHAR, 1=줄단위/LINE)
+        // `attr`/`eqedit` 두 필드가 동일한 값을 보관하므로 함께 채운다.
+        let raw_attr = r.read_u32().unwrap_or(0);
+        equation.attr = raw_attr;
+        equation.eqedit = raw_attr;
 
         // script: WCHAR 문자열 (길이 접두 UTF-16LE)
         if let Ok(script) = r.read_hwp_string() {
@@ -850,7 +994,14 @@ fn parse_form_control(ctrl_data: &[u8], child_records: &[Record]) -> Control {
         ..Default::default()
     };
 
-    // ctrl_data에서 width/height 추출 (bytes 12-19)
+    // [#6266] ctrl_data 는 다른 개체와 같은 `CommonObjAttr` 다 — 종전에는 앞
+    // 12바이트(attr·세로/가로 오프셋)를 버리고 width/height 만 읽어 배치를
+    // 잃었고, 그래서 렌더러가 양식 개체를 인라인 말고는 놓을 수 없었다.
+    if !ctrl_data.is_empty() {
+        form.common = parse_common_obj_attr(ctrl_data);
+    }
+    // width/height 는 종전 오프셋(12..20)을 그대로 유지한다 — 이 두 필드는
+    // 직렬화·왕복이 이미 참조하고 있어 값의 출처를 바꾸지 않는다.
     if ctrl_data.len() >= 20 {
         let mut r = ByteReader::new(ctrl_data);
         let _attr = r.read_u32().unwrap_or(0);

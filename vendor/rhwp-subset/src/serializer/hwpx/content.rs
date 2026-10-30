@@ -16,6 +16,8 @@ pub struct BinDataEntry {
     pub id: String,
     pub href: String,
     pub media_type: String,
+    /// content.hpf `isEmbeded` — false 면 외부 파일 참조 (ZIP 엔트리 없음, #1891)
+    pub is_embedded: bool,
 }
 
 /// 원본 content.hpf 에서 `<opf:metadata> … </opf:metadata>` 블록(태그 포함)을
@@ -25,6 +27,30 @@ pub struct BinDataEntry {
 /// IR 로 재생성하더라도 이 블록만은 원본을 보존해야 손실이 없다. self-closing
 /// (`<opf:metadata/>`) 형태도 처리한다. 형태를 인식하지 못하면 `None` 을 돌려
 /// 호출자가 하드코딩 기본값으로 폴백하도록 한다.
+/// [#3557] 원본 content.hpf 에서 `Scripts/` 항목의 `<opf:item .../>` 태그 원문과
+/// 그 id 목록을 추출한다 — 스크립트 파트는 IR 로 모델링되지 않으므로 매니페스트
+/// 참조도 원문 그대로 보존해야 패키지가 정합한다(zip 통과는 mod.rs).
+fn extract_script_items(original: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut rest = original;
+    while let Some(start) = rest.find("<opf:item ") {
+        let tail = &rest[start..];
+        let Some(end) = tail.find("/>") else { break };
+        let tag = &tail[..end + 2];
+        if tag.contains("href=\"Scripts/") {
+            let id = tag
+                .split("id=\"")
+                .nth(1)
+                .and_then(|t| t.split('"').next())
+                .unwrap_or("")
+                .to_string();
+            out.push((id, tag.to_string()));
+        }
+        rest = &tail[end + 2..];
+    }
+    out
+}
+
 fn extract_metadata_block(original: &str) -> Option<&str> {
     let open = original.find("<opf:metadata>")?;
     let close = original[open..].find("</opf:metadata>")? + open + "</opf:metadata>".len();
@@ -35,6 +61,8 @@ fn extract_metadata_block(original: &str) -> Option<&str> {
 pub fn write_content_hpf(
     section_hrefs: &[String],
     bin_data: &[BinDataEntry],
+    // `(소속 구역 인덱스, id, href)` — 매니페스트 순서가 바탕쪽의 구역 소속이다 (#6907).
+    master_items: &[(usize, String, String)],
     original_content_hpf: Option<&[u8]>,
 ) -> Result<Vec<u8>, SerializeError> {
     // 원본 metadata 블록(있으면) — 본문과 무관한 저작자/일자/주제 보존용.
@@ -127,7 +155,29 @@ pub fn write_content_hpf(
         ],
     )?;
 
+    // [#6907] 바탕쪽은 **그 소속 구역 바로 앞**에 놓는다 — 이 매니페스트 순서가
+    // 곧 바탕쪽의 구역 소속이기 때문이다(파서는 `sectionN.xml` 항목을 만나면
+    // 그때까지 모인 masterpage 를 그 구역에 배정한다). 종류별로 몰아 쓰면 모든
+    // 구역의 그룹이 비어, 파서가 «전부 비면 균등 배분» 폴백으로 떨어져 원래
+    // 바탕쪽이 없던 구역에도 소속을 만들어 낸다.
+    //
+    // id 와 href 의 인덱스는 전역 누적이라 그대로 두고 **자리만** 옮긴다 —
+    // 구역 XML 의 `idRef` 가 같은 전역 인덱스를 가리키므로 1차 바인딩 경로도 불변이다.
+    let emit_master = |w: &mut _, id: &str, href: &str| -> Result<(), SerializeError> {
+        empty_tag(
+            w,
+            "opf:item",
+            &[
+                ("id", id),
+                ("href", href),
+                ("media-type", "application/xml"),
+            ],
+        )
+    };
     for (i, href) in section_hrefs.iter().enumerate() {
+        for (_, id, mp_href) in master_items.iter().filter(|(owner, _, _)| *owner == i) {
+            emit_master(&mut w, id.as_str(), mp_href.as_str())?;
+        }
         let id = format!("section{}", i);
         empty_tag(
             &mut w,
@@ -138,6 +188,14 @@ pub fn write_content_hpf(
                 ("media-type", "application/xml"),
             ],
         )?;
+    }
+    // 소속 구역이 범위를 벗어난 바탕쪽은 잃지 않도록 끝에 쓴다(방어).
+    for (owner, id, mp_href) in master_items
+        .iter()
+        .filter(|(owner, _, _)| *owner >= section_hrefs.len())
+    {
+        let _ = owner;
+        emit_master(&mut w, id.as_str(), mp_href.as_str())?;
     }
 
     // settings.xml 등록
@@ -151,6 +209,15 @@ pub fn write_content_hpf(
         ],
     )?;
 
+    // [#3557] Scripts/* 항목 — 원본 태그 원문 splice(id·media-type 보존).
+    let script_items: Vec<(String, String)> =
+        original_str.map(extract_script_items).unwrap_or_default();
+    for (_, tag) in &script_items {
+        w.get_mut()
+            .write_all(tag.as_bytes())
+            .map_err(|e| SerializeError::XmlError(format!("script item splice: {e}")))?;
+    }
+
     for entry in bin_data {
         empty_tag(
             &mut w,
@@ -159,7 +226,7 @@ pub fn write_content_hpf(
                 ("id", entry.id.as_str()),
                 ("href", entry.href.as_str()),
                 ("media-type", entry.media_type.as_str()),
-                ("isEmbeded", "1"),
+                ("isEmbeded", if entry.is_embedded { "1" } else { "0" }),
             ],
         )?;
     }
@@ -181,6 +248,16 @@ pub fn write_content_hpf(
             &[("idref", id.as_str()), ("linear", "yes")],
         )?;
     }
+    // [#3557] Scripts spine 참조 — 한컴 원본은 스크립트 항목도 spine 에 나열한다.
+    for (id, _) in &script_items {
+        if !id.is_empty() {
+            empty_tag(
+                &mut w,
+                "opf:itemref",
+                &[("idref", id.as_str()), ("linear", "yes")],
+            )?;
+        }
+    }
     end_tag(&mut w, "opf:spine")?;
 
     end_tag(&mut w, "opf:package")?;
@@ -200,6 +277,7 @@ mod tests {
         let original = r#"<?xml version="1.0" encoding="UTF-8" standalone="yes" ?><opf:package xmlns:opf="http://www.idpf.org/2007/opf/"><opf:metadata><opf:title/><opf:language>ko</opf:language><opf:meta name="creator" content="text">손규현</opf:meta><opf:meta name="lastsaveby" content="text">stevek</opf:meta><opf:meta name="CreatedDate" content="text">2012-05-24T02:06:03Z</opf:meta></opf:metadata><opf:manifest/><opf:spine/></opf:package>"#;
         let out = write_content_hpf(
             &["Contents/section0.xml".to_string()],
+            &[],
             &[],
             Some(original.as_bytes()),
         )
@@ -237,7 +315,7 @@ mod tests {
     /// 원본이 없으면(HWP5 등) 하드코딩 metadata 로 폴백한다.
     #[test]
     fn metadata_falls_back_when_no_original() {
-        let out = write_content_hpf(&["Contents/section0.xml".to_string()], &[], None)
+        let out = write_content_hpf(&["Contents/section0.xml".to_string()], &[], &[], None)
             .expect("serialize");
         let s = String::from_utf8(out).expect("utf8");
         assert!(s.contains(r#"<opf:meta name="creator" content="text">rhwp</opf:meta>"#));

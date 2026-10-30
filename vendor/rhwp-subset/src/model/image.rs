@@ -4,8 +4,14 @@ use super::shape::{CommonObjAttr, ShapeComponentAttr};
 use super::style::ShapeBorderLine;
 use super::*;
 
+/// The document keeps the full link for editing/round-trip; a missing-picture
+/// label in exported/displayed content only needs its filename.
+pub(crate) fn external_picture_basename(path: &str) -> &str {
+    path.rsplit(['/', '\\']).next().unwrap_or("")
+}
+
 /// 그림 개체 (HWPTAG_SHAPE_COMPONENT_PICTURE)
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Picture {
     /// 개체 공통 속성
     pub common: CommonObjAttr,
@@ -47,10 +53,34 @@ pub struct Picture {
     /// imgClip extent 와 독립(전수 측정: 불일치 24/170) — 원본 이미지 픽셀 크기를
     /// verbatim 보존한다. (dimwidth, dimheight). HWPX 파서만 적재.
     pub img_dim: (u32, u32),
+    /// HWPX `<hp:pic reverse="...">` 값 — 그림 좌우 반전(한컴 Automation
+    /// `InsertPicture`의 `reverse` 옵션과 동일 개념). 파서가 읽지 않고 직렬화기가
+    /// 항상 "0"을 방출해 `reverse="1"`로 저장된 그림이 왕복 시 반전이 풀린다.
+    pub reverse: bool,
+    /// HWPX `<hp:pic lock="...">` 값 — 개체 잠금(보호) 여부. 파서가 읽지 않고
+    /// 직렬화기가 항상 "0"을 방출해 lock="1"로 저장된 그림이 왕복 시 잠금 해제됐다.
+    pub lock: bool,
+}
+
+impl Picture {
+    /// 저장된 자르기 폭이 있으면 높이가 비어 있어도 그 선택을 보존한다.
+    /// 빈 선택을 자르기 없음으로 바꾸면 한컴이 그리지 않는 원본 전체가 나타난다.
+    pub fn render_crop_rect(&self) -> Option<(i32, i32, i32, i32)> {
+        let c = &self.crop;
+        (c.right > c.left).then_some((c.left, c.top, c.right, c.bottom))
+    }
+
+    /// 그림 자르기 좌표가 기준으로 삼는 전체 이미지 좌표 범위.
+    ///
+    /// HWPX `imgClip`은 디코딩된 비트맵 픽셀과 항상 75 HU/px 관계가 아니며,
+    /// 이 경우 `imgDim`이 실제 좌표 범위를 보존한다.
+    pub fn crop_reference_size(&self) -> Option<(u32, u32)> {
+        (self.img_dim.0 > 0 && self.img_dim.1 > 0).then_some(self.img_dim)
+    }
 }
 
 /// 자르기 정보
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
 pub struct CropInfo {
     pub left: i32,
     pub top: i32,
@@ -59,7 +89,7 @@ pub struct CropInfo {
 }
 
 /// 이미지 속성
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ImageAttr {
     /// 밝기
     pub brightness: i8,
@@ -79,13 +109,13 @@ pub struct ImageAttr {
 }
 
 /// HWPX 그림 효과 (`hp:effects`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PictureEffects {
     pub shadow: Option<PictureShadow>,
 }
 
 /// HWPX 그림 그림자 효과 (`hp:shadow`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct PictureShadow {
     pub style: Option<String>,
     pub alpha: Option<String>,
@@ -100,14 +130,14 @@ pub struct PictureShadow {
 }
 
 /// HWPX 효과의 x/y 좌표성 값 (`hp:skew`, `hp:scale`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EffectPoint {
     pub x: Option<String>,
     pub y: Option<String>,
 }
 
 /// HWPX 효과 색상 (`hp:effectsColor`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EffectColor {
     pub color_type: Option<String>,
     pub scheme_idx: Option<String>,
@@ -117,7 +147,7 @@ pub struct EffectColor {
 }
 
 /// HWPX 효과 RGB 색상 (`hp:rgb`).
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct EffectRgb {
     pub r: Option<String>,
     pub g: Option<String>,

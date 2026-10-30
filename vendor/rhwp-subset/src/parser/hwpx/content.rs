@@ -66,7 +66,7 @@ pub fn parse_content_hpf(xml: &str) -> Result<PackageInfo, HwpxError> {
                         // isEmbeded="0" 인 경우만 false 로 설정.
                         let mut is_embedded = true;
                         for attr in e.attributes().flatten() {
-                            match attr.key.as_ref() {
+                            match attr.key.as_ref().as_bytes() {
                                 b"id" => id = attr_value(&attr),
                                 b"href" => href = attr_value(&attr),
                                 b"media-type" => media_type = attr_value(&attr),
@@ -82,7 +82,7 @@ pub fn parse_content_hpf(xml: &str) -> Result<PackageInfo, HwpxError> {
                     }
                     b"itemref" => {
                         for attr in e.attributes().flatten() {
-                            if attr.key.as_ref() == b"idref" {
+                            if attr.key.as_ref().as_bytes() == b"idref" {
                                 spine_order.push(attr_value(&attr));
                             }
                         }
@@ -129,7 +129,12 @@ pub fn parse_content_hpf(xml: &str) -> Result<PackageInfo, HwpxError> {
     for (id, href, media_type, is_embedded) in &all_items {
         let is_image = media_type.starts_with("image/");
         let is_bin_data_path = href.starts_with("BinData/") || href.contains("/BinData/");
-        if is_image || is_bin_data_path {
+        // [#1891] 외부 참조(isEmbeded="0")는 media-type 과 무관하게 BinData 항목이다.
+        // 원본이 "image/" 같은 퇴화 값을 갖거나 직렬화기가 octet-stream 으로 쓰는 등
+        // media-type 만으로는 판별할 수 없고, 누락 시 이후 항목의 인덱스(=bin_data_id)
+        // 가 밀려 그림 참조 전체가 어긋난다.
+        let is_external_link = !*is_embedded && media_type != "application/xml";
+        if is_image || is_bin_data_path || is_external_link {
             info.bin_data_items.push(PackageItem {
                 href: href.clone(),
                 media_type: media_type.clone(),
@@ -210,16 +215,12 @@ fn collect_section_master_pages(
 
 /// XML 어트리뷰트 값을 String으로 변환
 fn attr_value(attr: &quick_xml::events::attributes::Attribute) -> String {
-    String::from_utf8_lossy(&attr.value).to_string()
+    attr.value.as_ref().to_owned()
 }
 
 /// 네임스페이스 접두사를 제거하고 로컬 태그 이름을 반환
-fn local_tag_name(name: &[u8]) -> &[u8] {
-    if let Some(pos) = name.iter().position(|&b| b == b':') {
-        &name[pos + 1..]
-    } else {
-        name
-    }
+fn local_tag_name(name: &str) -> &[u8] {
+    name.rsplit(':').next().unwrap_or(name).as_bytes()
 }
 
 #[cfg(test)]

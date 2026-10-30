@@ -1,3986 +1,697 @@
 use std::env;
 use std::fs;
 use std::path::Path;
+use std::process;
+
+mod agent_profiles;
+mod anchor_log;
+mod atomic_file;
+mod audit_standard;
+mod capsule_sign;
+mod cli;
+mod disclose;
+mod lineage_bundle;
+mod mcp_serve;
+mod policy_gate;
+mod settle;
+use cli::commands::edit::runtime::{
+    check_expect_sha256, edit_output_format, edit_serialize, edit_verify_report, finish_edit_write,
+    EditOutputFormat,
+};
+pub(crate) use cli::commands::edit::{
+    measure_cell_overflow, recolor_cell_text_black, resolve_table_cell,
+    set_cell_control_char_rejection, CellResolveError,
+};
+pub(crate) use cli::document_io::{
+    classify_hwp_error, cli_output_password, cli_password, load_document, load_document_core,
+    LoadError,
+};
+use cli::document_io::{
+    has_global_auth_option, is_batch_invocation, set_cli_output_password, set_cli_password,
+    strip_global_auth_options, strip_utf8_bom,
+};
+use cli::integrity::{
+    cas_test_mark_checked_and_wait, cas_test_synchronize_before_lock, sha256_hex_of, CasPathLock,
+};
+pub(crate) use cli::units::{hu_to_mm, hu_to_mm_i};
+use rhwp::provenance;
+use rhwp::schema_registry::ENVELOPE_SCHEMA_VERSION;
+
+/// [#2707] CLI 종료 코드 계약 — 성공.
+const EXIT_OK: i32 = 0;
+/// [#2707] CLI 종료 코드 계약 — 런타임 실패(읽기·파싱·렌더·쓰기).
+const EXIT_RUNTIME: i32 = 1;
+/// [#2707] CLI 종료 코드 계약 — 사용법 오류(인자 없음, 알 수 없는 옵션/명령, 페이지 범위 초과).
+///
+/// 3(`--verify` IR 차이)·4(`--verify-pages` 페이지 수 불일치)는
+/// `mydocs/manual/cli_commands.md` 에 이미 문서화된 계약이므로 상수화 대상에서 제외하고
+/// 기존 `process::exit(3)`/`process::exit(4)` 호출부를 그대로 둔다.
+const EXIT_USAGE: i32 = 2;
+
+/// [#2707] 명령 함수가 돌려준 종료 코드를 프로세스 종료 코드로 전파한다.
+///
+/// 0이면 아무것도 하지 않아 `main` 이 정상 종료하고, 그 외에는 즉시 그 코드로 종료한다.
+fn exit_with(exit_code: i32) {
+    if exit_code != EXIT_OK {
+        process::exit(exit_code);
+    }
+}
+
+/// 쪽수와 IR 검증은 모두 수행하되, 종료 코드는 쪽수 실패를 우선한다.
+fn verification_exit_code(page_failed: bool, ir_failed: bool) -> i32 {
+    if page_failed {
+        4
+    } else if ir_failed {
+        3
+    } else {
+        EXIT_OK
+    }
+}
+
+#[cfg(test)]
+mod verification_exit_code_tests {
+    use super::verification_exit_code;
+
+    #[test]
+    fn page_failure_keeps_precedence_when_ir_also_fails() {
+        assert_eq!(verification_exit_code(false, false), 0);
+        assert_eq!(verification_exit_code(false, true), 3);
+        assert_eq!(verification_exit_code(true, false), 4);
+        assert_eq!(verification_exit_code(true, true), 4);
+    }
+}
 
 fn main() {
-    let args: Vec<String> = env::args().collect();
+    let raw_args: Vec<String> = env::args().collect();
+    if is_batch_invocation(&raw_args) && has_global_auth_option(&raw_args) {
+        eprintln!(
+            "오류: batch 는 --password·--password-stdin·--output-password·--output-password-stdin 을 지원하지 않습니다. stdin 은 파일 경로 목록 전용입니다."
+        );
+        process::exit(EXIT_USAGE);
+    }
+    // 전역 인증 pre-scan: 어느 위치든 입력/출력 비밀번호 옵션을 뽑아낸다.
+    // 비밀번호는 pre-scan 안에서 thread-local 상태로 들어가고 여기로는 돌아오지 않는다.
+    let args = match strip_global_auth_options(raw_args) {
+        Ok(v) => v,
+        Err(code) => process::exit(code),
+    };
+
+    // [#5791] `rhwp <명령> [<하위명령>] --help` — 그 명령 절만 내고 exit 0.
+    // 디스패치보다 앞이다: 하위 명령 판정이나 옵션 파서에 닿기 전에 답해야
+    // "알 수 없는 옵션"·"파일을 읽을 수 없습니다"로 떨어지지 않는다.
+    if let Some(code) = cli::metadata::help::scoped_help(&args[1..]) {
+        process::exit(code);
+    }
 
     match args.get(1).map(|s| s.as_str()) {
-        Some("--help") | Some("-h") => print_help(),
+        Some("--help") | Some("-h") => cli::metadata::help::print_help(),
         Some("--version") | Some("-V") => println!("rhwp v{}", rhwp::version()),
-        Some("export-svg") => export_svg(&args[2..]),
-        Some("export-render-tree") => export_render_tree(&args[2..]),
-        Some("export-png") => export_png(&args[2..]),
-        Some("export-pdf") => export_pdf(&args[2..]),
-        Some("export-text") => export_text(&args[2..]),
-        Some("export-markdown") => export_markdown(&args[2..]),
-        Some("info") => show_info(&args[2..]),
-        Some("dump") => dump_controls(&args[2..]),
-        Some("dump-note-shape") => dump_note_shape(&args[2..]),
-        Some("dump-endnote-lines") => dump_endnote_lines(&args[2..]),
-        Some("dump-pages") => dump_pages(&args[2..]),
-        Some("diag") => diag_document(&args[2..]),
-        Some("convert") => convert_hwp(&args[2..]),
-        Some("build-from-ingest") => build_from_ingest(&args[2..]),
-        Some("hwp5-inventory") => rhwp::diagnostics::hwp5_inventory::run(&args[2..]),
-        Some("hwp5-inventory-diff") => rhwp::diagnostics::hwp5_inventory_diff::run(&args[2..]),
-        Some("hwp5-contract-analyze") => rhwp::diagnostics::hwp5_contract_analyze::run(&args[2..]),
-        Some("hwp5-ctrl-data-trace") => rhwp::diagnostics::hwp5_ctrl_data_trace::run(&args[2..]),
-        Some("hwp5-contract-probe") => rhwp::diagnostics::hwp5_contract_probe::run(&args[2..]),
-        Some("hwp5-table-probe") => rhwp::diagnostics::hwp5_table_probe::run(&args[2..]),
+        Some("export-svg") => exit_with(cli::outputs::vector::export_svg(&args[2..])),
+        Some("export-render-tree") => {
+            exit_with(cli::outputs::vector::export_render_tree(&args[2..]))
+        }
+        Some("export-structure") => {
+            exit_with(cli::queries::structure::export_structure(&args[2..]))
+        }
+        Some("export-png") => exit_with(cli::outputs::raster::export_png(&args[2..])),
+        // [gym_gpu_raster] GPU 가속 PNG 래스터화 (feature = "gpu"). export-png(native-skia)과
+        // 같은 방식으로 feature 게이팅 — 미빌드 바이너리는 사용법 오류(exit 2)로 안내한다.
+        Some("export-png-gpu") => exit_with(cli::outputs::raster::export_png_gpu(&args[2..])),
+        Some("gpu-info") => exit_with(cli::outputs::raster::gpu_info(&args[2..])),
+        Some("export-pdf") => exit_with(cli::outputs::pdf::export_pdf(&args[2..])),
+        Some("export-text") => exit_with(cli::outputs::text::export_text(&args[2..])),
+        Some("export-markdown") => exit_with(cli::outputs::text::export_markdown(&args[2..])),
+        Some("export-tables") => exit_with(cli::outputs::tabular::export_tables(&args[2..])),
+        Some("export-llm") => exit_with(cli::outputs::text::export_llm(&args[2..])),
+        Some("table-to-csv") => exit_with(cli::outputs::tabular::table_to_csv(&args[2..])),
+        Some("csv-to-table") => exit_with(cli::commands::tabular_import::csv_to_table(&args[2..])),
+        Some("chart-to-csv") => exit_with(cli::outputs::tabular::chart_to_csv(&args[2..])),
+        Some("csv-to-chart") => exit_with(cli::commands::tabular_import::csv_to_chart(&args[2..])),
+        Some("export-hwpx") => exit_with(cli::commands::conversion::export_hwpx(&args[2..])),
+        Some("export-hml") => cli::commands::conversion::export_hml(&args[2..]),
+        Some("export-doclang") => exit_with(cli::outputs::doclang::export_doclang(&args[2..])),
+        Some("export-ir-schema") => exit_with(cmd_export_ir_schema(&args[2..])),
+        Some("export-capabilities-schema") => exit_with(cmd_export_capabilities_schema(&args[2..])),
+        Some("export-ontology") => exit_with(cmd_export_ontology(&args[2..])),
+        Some("capabilities") => {
+            exit_with(cli::metadata::capabilities::show_capabilities(&args[2..]))
+        }
+        Some("export-provenance-map") => exit_with(
+            cli::metadata::capabilities::export_provenance_map(&args[2..]),
+        ),
+        Some("export-agent-manifest") => exit_with(cmd_export_agent_manifest(&args[2..])),
+        Some("mcp-serve") => exit_with(mcp_serve::run(&args[2..])),
+        Some("batch") => exit_with(cli::batch::run(&args[2..])),
+        Some("scan") => exit_with(cli::queries::scan::run(&args[2..])),
+        Some("threat-scan") => {
+            exit_with(cli::queries::security_inspection::threat_scan(&args[2..]))
+        }
+        Some("info") => exit_with(cli::queries::info::run(&args[2..])),
+        Some("word-count") => exit_with(cli::queries::document_inventory::word_count(&args[2..])),
+        Some("bookmarks") => exit_with(cli::queries::document_inventory::bookmarks(&args[2..])),
+        Some("charts") => exit_with(cli::queries::document_inventory::charts(&args[2..])),
+        Some("form-value") => exit_with(cli::queries::structured_objects::form_value(&args[2..])),
+        Some("header-footer") => {
+            exit_with(cli::queries::structured_objects::header_footer(&args[2..]))
+        }
+        Some("headers-footers") => exit_with(cli::queries::structured_objects::headers_footers(
+            &args[2..],
+        )),
+        Some("digest") => exit_with(cli::queries::digest::digest_document(&args[2..])),
+        Some("dump") => exit_with(cli::queries::control_dump::run(&args[2..])),
+        Some("dump-note-shape") => {
+            exit_with(cli::queries::diagnostics::dump_note_shape(&args[2..]))
+        }
+        Some("dump-endnote-lines") => {
+            exit_with(cli::queries::diagnostics::dump_endnote_lines(&args[2..]))
+        }
+        Some("dump-pages") => exit_with(cli::queries::page_dump::run(&args[2..])),
+        Some("dump-extents") => exit_with(cli::queries::diagnostics::dump_extents(&args[2..])),
+        Some("diag") => exit_with(cli::queries::diagnostics::diag_document(&args[2..])),
+        Some("search") => exit_with(cli::queries::search::search_document(&args[2..])),
+        Some("inspect") => exit_with(inspect_command(&args[2..])),
+        Some("armor") => exit_with(cli::queries::security_inspection::armor_command(&args[2..])),
+        Some("extract-data") => exit_with(cli::queries::data_extraction::extract_data_command(
+            &args[2..],
+        )),
+        Some("convert") => exit_with(cli::commands::conversion::convert_hwp(&args[2..])),
+        Some("extract-pages") => exit_with(cli::commands::conversion::extract_pages(&args[2..])),
+        Some("build-from-ingest") => {
+            exit_with(cli::commands::generation::build_from_ingest(&args[2..]))
+        }
+        Some("scaffold") => exit_with(cli::commands::generation::run_scaffold(&args[2..])),
+        Some("hwp5-inventory") => exit_with(rhwp::diagnostics::hwp5_inventory::run(&args[2..])),
+        Some("hwp5-inventory-diff") => {
+            exit_with(rhwp::diagnostics::hwp5_inventory_diff::run(&args[2..]))
+        }
+        Some("hwp5-contract-analyze") => {
+            exit_with(rhwp::diagnostics::hwp5_contract_analyze::run(&args[2..]))
+        }
+        Some("hwp5-ctrl-data-trace") => {
+            exit_with(rhwp::diagnostics::hwp5_ctrl_data_trace::run(&args[2..]))
+        }
+        Some("hwp5-contract-probe") => {
+            exit_with(rhwp::diagnostics::hwp5_contract_probe::run(&args[2..]))
+        }
+        Some("hwp5-table-probe") => exit_with(rhwp::diagnostics::hwp5_table_probe::run(&args[2..])),
         Some("hwp5-mel-personnel-probe") => {
-            rhwp::diagnostics::hwp5_mel_personnel_probe::run(&args[2..])
+            exit_with(rhwp::diagnostics::hwp5_mel_personnel_probe::run(&args[2..]))
         }
-        Some("hwp5-borderfill-diagonal-probe") => {
-            rhwp::diagnostics::hwp5_borderfill_diagonal_probe::run(&args[2..])
+        Some("hwp5-borderfill-diagonal-probe") => exit_with(
+            rhwp::diagnostics::hwp5_borderfill_diagonal_probe::run(&args[2..]),
+        ),
+        Some("hwp5-first-para-control-probe") => exit_with(
+            rhwp::diagnostics::hwp5_first_para_control_probe::run(&args[2..]),
+        ),
+        Some("hwp5-anchor-trace") => {
+            exit_with(rhwp::diagnostics::hwp5_anchor_trace::run(&args[2..]))
         }
-        Some("hwp5-first-para-control-probe") => {
-            rhwp::diagnostics::hwp5_first_para_control_probe::run(&args[2..])
+        Some("hwp5-char-shape-audit") => {
+            exit_with(rhwp::diagnostics::hwp5_char_shape_audit::run(&args[2..]))
         }
-        Some("hwp5-anchor-trace") => rhwp::diagnostics::hwp5_anchor_trace::run(&args[2..]),
         Some("hwp5-cell-header-probe") => {
-            rhwp::diagnostics::hwp5_cell_header_probe::run(&args[2..])
+            exit_with(rhwp::diagnostics::hwp5_cell_header_probe::run(&args[2..]))
         }
-        Some("dump-records") => dump_raw_records(&args[2..]),
-        Some("test-shape") => test_shape_roundtrip(&args[2..]),
-        Some("test-caption") => test_caption(&args[2..]),
-        Some("gen-table") => gen_table(&args[2..]),
-        Some("gen-pua") => gen_pua_test(&args[2..]),
-        Some("test-field") => test_field_roundtrip(&args[2..]),
-        Some("ir-diff") => ir_diff(&args[2..]),
+        Some("dump-records") => exit_with(cli::queries::diagnostics::dump_raw_records(&args[2..])),
+        Some("test-shape") => exit_with(test_shape_roundtrip(&args[2..])),
+        Some("test-caption") => exit_with(cli::commands::caption_validation::run(&args[2..])),
+        Some("gen-table") => exit_with(gen_table(&args[2..])),
+        Some("gen-pua") => exit_with(gen_pua_test(&args[2..])),
+        Some("test-field") => exit_with(cli::commands::internal_validation::run(&args[2..])),
+        Some("ir-diff") => exit_with(cli::queries::ir_comparison::ir_diff(&args[2..])),
+        Some("ir-sweep") => exit_with(cli::queries::ir_comparison::ir_sweep(&args[2..])),
+        Some("dump-anchors") => {
+            exit_with(cli::queries::position_diagnostics::dump_anchors(&args[2..]))
+        }
+        Some("dump-carets") => {
+            exit_with(cli::queries::position_diagnostics::dump_carets(&args[2..]))
+        }
+        Some("verify") => exit_with(cli::queries::verification::run(&args[2..])),
         Some("hwpx-roundtrip") => rhwp::diagnostics::hwpx_roundtrip_batch::run(&args[2..]),
-        Some("thumbnail") => extract_thumbnail(&args[2..]),
-        _ => {
-            println!("rhwp v{}", rhwp::version());
-            println!("사용법: rhwp <명령> [옵션]");
-            println!("'rhwp --help'로 자세한 사용법을 확인하세요.");
+        Some("hwp5-roundtrip") => rhwp::diagnostics::hwp5_roundtrip_batch::run(&args[2..]),
+        Some("render-diff") => rhwp::diagnostics::render_geom_diff::run(&args[2..]),
+        Some("layout-anomaly") => exit_with(rhwp::diagnostics::layout_anomaly::run(&args[2..])),
+        Some("measure-width") => exit_with(rhwp::diagnostics::text_width_probe::run(&args[2..])),
+        Some("core-pages") => exit_with(rhwp::diagnostics::core_pages_probe::run(&args[2..])),
+        Some("bench") => exit_with(rhwp::diagnostics::bench::run(&args[2..])),
+        Some("thumbnail") => exit_with(cli::outputs::preview::extract_thumbnail(&args[2..])),
+        Some("fields") => exit_with(cli::queries::document_inventory::show_fields(&args[2..])),
+        Some("explain") => exit_with(cli::queries::explain::explain_document(&args[2..])),
+        Some("explore") => exit_with(cli::queries::explore::explore_document(&args[2..])),
+        Some("edit") => exit_with(cli::commands::edit::run(&args[2..])),
+        Some("run") => exit_with(cli::protocol::cmd_run_plan(&args[2..])),
+        Some("replay") => exit_with(cli::protocol::cmd_replay(&args[2..])),
+        Some("audit") => exit_with(cli::protocol::cmd_audit(&args[2..])),
+        Some("lineage") => exit_with(cli::protocol::cmd_lineage(&args[2..])),
+        Some("keygen") => exit_with(cli::protocol::cmd_keygen(&args[2..])),
+        Some("verify-signature") => exit_with(cli::protocol::cmd_verify_signature(&args[2..])),
+        Some("harness") => exit_with(cli::protocol::cmd_harness(&args[2..])),
+        // [#4537] 통합 판정은 **읽기 전용**이라 쓰기 명령(harness)과 표면을 나눈다 —
+        // capabilities 의 category 가 도구 주석(readOnlyHint)의 교차 검증 원천이므로,
+        // 한 명령이 쓰기·읽기를 겸하면 MCP 주석 계약이 성립하지 않는다.
+        Some("harness-status") => exit_with(cli::protocol::cmd_harness_status(&args[2..])),
+        Some("anchor") => exit_with(cli::protocol::cmd_anchor(&args[2..])),
+        Some("gate") => exit_with(cli::protocol::cmd_gate(&args[2..])),
+        Some("bundle") => exit_with(cli::protocol::cmd_bundle(&args[2..])),
+        Some("disclose") => exit_with(cli::protocol::cmd_disclose(&args[2..])),
+        Some("settle") => exit_with(cli::protocol::cmd_settle(&args[2..])),
+        Some("audit-report") => exit_with(cli::protocol::cmd_audit_report(&args[2..])),
+        Some("recall-scope") => exit_with(cli::protocol::cmd_recall_scope(&args[2..])),
+        Some("conformance") => exit_with(cli::protocol::cmd_conformance(&args[2..])),
+        // [#3719 §6-4] 계획을 *만드는* 쪽의 정답지 — `run` 바로 옆에 둔다.
+        Some("export-plan-schema") => exit_with(cmd_export_plan_schema(&args[2..])),
+        // [#2707] 알 수 없는 명령·명령 누락은 사용법 오류다. 표준 CLI 관례대로 stderr 로 안내하고
+        // 종료 코드 2로 끝낸다(기존에는 stdout + 0이라 오타 낸 명령이 스크립트에서 성공으로 보였다).
+        other => {
+            // [#4220 T4] 수복 한 줄은 stderr 마지막 줄이어야 하므로(소비자는 마지막
+            // `수복: ` 줄 하나만 파싱한다) 산문을 모두 낸 뒤에 방출한다. 두 부류만
+            // 결정론적이다: 확신 교정(임계 내 오타)과 명령 누락(발견 경로는 언제나
+            // capabilities). 임계 밖 오타는 수복 줄도 침묵한다 — 오제안 0.
+            let recovery: Option<(String, &str)> = match other {
+                Some(command) => {
+                    eprintln!("오류: 알 수 없는 명령입니다 - {}", command);
+                    // [#3694] did-you-mean — 후보는 capabilities 단일 출처. 이름 환각을
+                    // 교정 단서 없이 돌려보내면 경량 에이전트는 맹목 재시도 루프에 빠진다.
+                    let names = cli::metadata::capabilities::capabilities_command_names();
+                    let hint = cli::metadata::capabilities::closest_name(
+                        command,
+                        names.iter().map(String::as_str),
+                    );
+                    if let Some(hint) = &hint {
+                        eprintln!("힌트: 가장 가까운 명령은 '{hint}' 입니다");
+                    }
+                    hint.map(|h| (h, "요청한 이름이 없음 — 가장 가까운 실존 명령으로 교정"))
+                }
+                None => {
+                    eprintln!("오류: 명령을 지정해주세요.");
+                    Some((
+                        "capabilities".to_string(),
+                        "명령이 지정되지 않음 — 실행 가능한 명령 목록·계약은 capabilities 가 자기서술",
+                    ))
+                }
+            };
+            eprintln!("rhwp v{}", rhwp::version());
+            eprintln!("사용법: rhwp <명령> [옵션]");
+            eprintln!("'rhwp --help'로 자세한 사용법을 확인하세요.");
+            if let Some((name, why)) = recovery {
+                cli::metadata::capabilities::eprint_usage_recovery(&name, None, why);
+            }
+            process::exit(EXIT_USAGE);
         }
     }
 }
 
-fn print_help() {
-    println!("rhwp v{} - HWP 파일 뷰어", rhwp::version());
-    println!();
-    println!("사용법: rhwp <명령> [옵션]");
-    println!();
-    println!("명령:");
-    println!("  export-svg <파일.hwp> [옵션]");
-    println!("      HWP 파일을 SVG로 내보내기");
-    println!();
-    println!("      -o, --output <폴더>     출력 폴더 (기본: output/)");
-    println!("      -p, --page <번호>       특정 페이지만 내보내기 (0부터 시작)");
-    println!("      --show-para-marks       문단부호(↵/↓) 표시");
-    println!("      --show-control-codes    조판부호 보이기 (문단부호 + 개체 마커 등)");
-    println!("      --debug-overlay         디버그 오버레이 (문단/표 경계 + 인덱스 라벨)");
-    println!("      --respect-vpos-reset    LINE_SEG vpos=0 리셋을 단/페이지 강제 경계로 처리");
-    println!("      --show-grid[=Nmm]       격자 오버레이 (기본: 1mm, 예: --show-grid=3mm)");
-    println!("      --grid-origin=X,Y|auto  격자 종이 기준 위치 (예: --grid-origin=15mm,20mm)");
-    println!("      --font-style            @font-face local() 참조 삽입 (폰트 데이터 미포함)");
-    println!("      --embed-fonts           폰트 서브셋 임베딩 (사용 글자만 base64)");
-    println!("      --embed-fonts=full      폰트 전체 임베딩 (base64)");
-    println!("      --font-path <경로>      폰트 파일 탐색 경로 (여러 번 지정 가능)");
-    println!();
-    println!("  export-render-tree <파일.hwp> [옵션]");
-    println!("      페이지별 render tree bbox JSON을 내보내기 (레이아웃 시각 분석용)");
-    println!();
-    println!("      -o, --output <폴더>     출력 폴더 (기본: output/)");
-    println!("      -p, --page <번호>       특정 페이지만 내보내기 (0부터 시작)");
-    println!("      --show-para-marks       문단부호(↵/↓) 표시 상태의 트리 생성");
-    println!("      --show-control-codes    조판부호 보이기 상태의 트리 생성");
-    println!("      --respect-vpos-reset    LINE_SEG vpos=0 리셋을 단/페이지 강제 경계로 처리");
-    println!();
-    println!("  export-png <파일.hwp> [옵션]   (native-skia feature 필요)");
-    println!("      HWP 파일을 PNG로 내보내기 (Skia raster backend, AI 파이프라인 + VLM 연동)");
-    println!();
-    println!("      -o, --output <폴더>     출력 폴더 (기본: output/)");
-    println!("      -p, --page <번호>       특정 페이지만 내보내기 (0부터 시작)");
-    println!("      --font-path <경로>      폰트 파일 탐색 경로 (여러 번 지정 가능)");
-    println!("                              한컴 전용 폰트 (HY견명조 등) 가 시스템에 없을 때 ttfs 디렉토리 지정");
-    println!("      --scale <배율>          렌더링 배율 (기본: 1.0)");
-    println!("      --max-dimension <픽셀>  한 변 최대 픽셀 (longest edge). VLM 입력 한도용.");
-    println!(
-        "                              명시 --scale 이 없으면 자동 scale 계산 (페이지 → 한도 안)"
-    );
-    println!("      --dpi <값>              DPI 메타데이터 (PNG pHYs chunk). 실제 픽셀 수 무관.");
-    println!("                              --scale 미지정 시 scale = dpi/96 자동 계산");
-    println!("      --vlm-target <프리셋>   VLM 입력 프리셋 (하이픈/밑줄 모두 허용):");
-    println!("                              claude:     1568 px / 1.15 MP (Claude Vision)");
-    println!("                              gpt4v-low:  512 px (GPT-4V low detail)");
-    println!(
-        "                              gpt4v-high: 2000 px / 1.54 MP (GPT-4V high, 별칭: gpt4v)"
-    );
-    println!("                              gemini:     3072 px (Google Gemini)");
-    println!("                              qwen-vl:    2240 px (Qwen-VL, 별칭: qwen)");
-    println!("                              llava:      672 px (LLaVA / OSS CLIP)");
-    println!();
-    println!("  export-text <파일.hwp> [옵션]");
-    println!("      페이지별 텍스트를 TXT로 내보내기");
-    println!();
-    println!("      -o, --output <폴더>     출력 폴더 (기본: output/)");
-    println!("      -p, --page <번호>       특정 페이지만 내보내기 (0부터 시작)");
-    println!();
-    println!("  export-markdown <파일.hwp> [옵션]");
-    println!("      페이지별 텍스트를 Markdown(.md)으로 내보내기");
-    println!();
-    println!("      -o, --output <폴더>     출력 폴더 (기본: output/)");
-    println!("      -p, --page <번호>       특정 페이지만 내보내기 (0부터 시작)");
-    println!();
-    println!("  export-pdf <파일.hwp> [-o 출력.pdf] [-p 페이지]");
-    println!("      HWP 파일을 PDF로 내보내기 (svg2pdf + pdf-writer)");
-    println!();
-    println!("  info <파일.hwp>");
-    println!("      HWP 파일 정보 표시");
-    println!();
-    println!("  dump <파일.hwp> [--section <번호>] [--para <번호>]");
-    println!("      문서 조판부호 구조 덤프 (디버깅용)");
-    println!();
-    println!("  dump-note-shape <파일.hwp|파일.hwpx>");
-    println!("      구역별 각주/미주 모양 raw 값과 한컴 UI 의미값을 JSON으로 덤프");
-    println!();
-    println!("  dump-endnote-lines <파일.hwp> <section> <para> <control> [note-para]");
-    println!("      특정 미주 원본 문단의 line_seg, TextRun, TAC 수식 위치를 함께 덤프");
-    println!();
-    println!("  dump-pages <파일.hwp> [-p <번호>] [--respect-vpos-reset]");
-    println!("      페이지네이션 결과 덤프 (페이지별 문단/표 배치 목록)");
-    println!();
-    println!("  dump-records <파일.hwp>");
-    println!("      HWP5 raw record 덤프 (DocInfo/BodyText 레코드 트리)");
-    println!();
-    println!("  diag <파일.hwp>");
-    println!("      문서 구조 진단 (번호/글머리표/개요 분석)");
-    println!();
-    println!("  hwp5-inventory <파일.hwp> [--format jsonl|md] [--section N] [--out <path>]");
-    println!("      HWP5 DocInfo/BodyText record inventory 생성 (HWPX→HWP contract 분석용)");
-    println!();
-    println!("  hwp5-inventory-diff <oracle.hwp> <generated.hwp> [--align index|lcs] [--report diff|hints|bundles|table-fields|table-probe-plan] [--focus all|table|shape|ctrl|missing|docinfo] [--window N] [--format jsonl|md] [--section N] [--out <path>]");
-    println!("      HWP5 inventory 비교 결과, contract 후보 힌트, 후보 주변 bundle 생성");
-    println!();
-    println!("  hwp5-contract-analyze <source.hwpx> <oracle.hwp> <generated.hwp> --out-dir <폴더>");
-    println!("      HWPX/HWP oracle/generated record-control contract graph 분석 보고서 생성");
-    println!();
-    println!("  hwp5-ctrl-data-trace <oracle.hwp> <generated.hwp> --out <path> [--section N] [--record-index N]");
-    println!("      oracle/generated CTRL_DATA ParameterSet 구조 추적 보고서 생성");
-    println!();
-    println!("  hwp5-contract-probe <oracle.hwp> <generated.hwp> --out-dir <폴더>");
-    println!("      DocInfo MEMO_SHAPE/ID_MAPPINGS와 누락 CTRL_DATA 축별 판정용 HWP probe 생성");
-    println!();
-    println!("  hwp5-table-probe <oracle.hwp> <generated.hwp> --out-dir <폴더>");
-    println!("      TABLE/CTRL_HEADER(Table) field 축별 판정용 HWP probe 생성");
-    println!();
-    println!("  hwp5-mel-personnel-probe <oracle.hwp> <generated.hwp> --out-dir <폴더>");
-    println!("      mel-001 인원현황 표 TABLE/LIST_HEADER/PARA_HEADER 축별 판정용 HWP probe 생성");
-    println!();
-    println!("  hwp5-borderfill-diagonal-probe <oracle.hwp> <generated.hwp> --out-dir <폴더>");
-    println!("      DocInfo BORDER_FILL 대각선 attr/payload 축별 판정용 HWP probe 생성");
-    println!();
-    println!("  hwp5-first-para-control-probe <oracle.hwp> <generated.hwp> --out-dir <폴더>");
-    println!("      첫 문단 control/PARA_TEXT/PARA_CHAR_SHAPE 계약 축별 판정용 HWP probe 생성");
-    println!();
-    println!("  hwp5-anchor-trace <파일.hwp> --needle <텍스트> [--section N] [--window N] [--out <path>]");
-    println!("      특정 텍스트를 포함한 PARA_TEXT 주변의 raw HWP5 record를 추적");
-    println!();
-    println!("  hwp5-cell-header-probe <oracle.hwp> <generated.hwp> --out-dir <폴더>");
-    println!("      표 셀 LIST_HEADER/PARA_HEADER 계약 축별 판정용 HWP probe 생성");
-    println!();
-    println!("  convert <입력.hwp|입력.hwpx> <출력.hwp>");
-    println!("      배포용(읽기전용) HWP를 편집 가능한 HWP로 변환");
-    println!();
-    println!("  build-from-ingest <ingest.json> [--media-dir <dir>] -o <out.hwpx>");
-    println!("      ingest JSON(시험문제 등)을 HWPX로 생성 (rhwp-exam-ingest 파이프라인)");
-    println!();
-    println!("  ir-diff <파일A.hwpx> <파일B.hwp> [-s <구역>] [-p <문단>]");
-    println!("      두 파일의 IR(중간표현) 비교 (HWPX↔HWP 불일치 검출)");
-    println!("      비교 항목: text, char_count, char_offsets, char_shapes, line_segs,");
-    println!("                 controls(타입+속성), tab_extended, ParaShape, TabDef");
-    println!("      표: page_break, outer_margin, treat_as_char, wrap, size, v_offset/h_offset");
-    println!("      그림/도형: treat_as_char, wrap, size, v_offset/h_offset, vert_rel/horz_rel");
-    println!();
-    println!("  hwpx-roundtrip <파일.hwpx | --batch 폴더> [-o <출력폴더>] [--lineseg-report]");
-    println!("      HWPX → IR → HWPX roundtrip 검증 (Task #1315 baseline)");
-    println!("      재조립 .hwpx와 inventory.tsv를 출력 폴더(기본 output/poc/task1315)에 생성");
-    println!("      --lineseg-report: 문단별 lineseg diff를 lineseg_diff.tsv로 산출 (#1380 측정)");
-    println!();
-    println!("  thumbnail <파일.hwp> [옵션]");
-    println!("      HWP 파일에서 썸네일(PrvImage) 추출");
-    println!();
-    println!("      -o, --output <파일>       출력 파일 경로 (기본: 입력명_thumb.png)");
-    println!("      --base64                  base64 문자열을 stdout에 출력");
-    println!("      --data-uri                data:image/... URI 형식으로 stdout에 출력");
-    println!();
-    println!("내부 개발·회귀 도구 (일반 사용자 대상 아님):");
-    println!("  test-caption <파일.hwp>             캡션 라운드트립 검증");
-    println!("  test-field <파일.hwp>               필드 라운드트립 검증");
-    println!("  test-shape <입력.hwp> <출력.hwp>    도형 라운드트립 검증");
-    println!("  gen-table                           표 테스트 HWP 생성");
-    println!("  gen-pua                             PUA 문자 테스트 HWP 생성");
-    println!();
-    println!("옵션:");
-    println!("  -h, --help      도움말 표시");
-    println!("  -V, --version   버전 표시");
+// [#5511] 최상위 dispatch 끝 — 소유 모듈 이동과 무관한 characterization 경계다.
+
+/// [#3346] `export-tables --json` 과 `batch export-tables` 가 공유하는 봉투.
+fn tables_json_value(
+    file_path: &str,
+    tables: &[rhwp::document_core::queries::table_extract::TableGrid],
+) -> serde_json::Value {
+    provenance::marked(
+        serde_json::json!({
+            "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+            "source": file_path,
+            "tableCount": tables.len(),
+            "tables": tables,
+        }),
+        "export-tables",
+    )
 }
 
-fn export_svg(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp export-svg <파일.hwp> [옵션] (rhwp --help 참조)");
-        return;
+/// [#3346] `fields --json` 과 `batch fields` 가 공유하는 봉투.
+fn fields_json_value(file_path: &str, fields: &[serde_json::Value]) -> serde_json::Value {
+    let names: Vec<String> = fields
+        .iter()
+        .filter_map(|f| f["name"].as_str().map(String::from))
+        .collect();
+    provenance::marked(
+        serde_json::json!({
+            "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+            "source": file_path,
+            "fieldCount": fields.len(),
+            "fields": fields,
+            "textSecurity": text_security_value(&names),
+        }),
+        "fields",
+    )
+}
+
+/// 누름틀 이름 축의 유니코드 기만 판정 봉투.
+///
+/// 봉투에 담기는 이름은 **공격자가 내용을 정할 수 있는 문서**에서 온다. 에이전트는
+/// 그 이름으로 "이 칸을 채워라"를 지목하므로, 화면상 같지만 바이트가 다른 이름 쌍이
+/// 있으면 엉뚱한 칸이 채워지고도 `filledCount` 는 성공을 보고한다(#3707).
+///
+/// 판정만 하고 이름을 고치지 않는다 — 문서 엔진이 사용자 문자열을 조용히 바꾸는 것은
+/// 어떤 보안 이득으로도 정당화되지 않는다. `status` 는 `clean`/`warning` 2단이고,
+/// 항상 실려 나간다: 필드가 없으면 `clean`, 옛 바이너리면 키 자체가 없다 —
+/// 소비자가 "검사했는데 깨끗함"과 "검사하지 않음"을 구별할 수 있어야 한다.
+fn text_security_value(names: &[String]) -> serde_json::Value {
+    use rhwp::document_core::text_security as ts;
+
+    let mut findings: Vec<serde_json::Value> = Vec::new();
+
+    // ① 화면상 같은 이름 쌍 — 실제 공격 서명이다.
+    for (_, group) in ts::confusable_collisions(names) {
+        findings.push(serde_json::json!({
+            "kind": "confusableFieldName",
+            "scope": "fieldName",
+            "names": group,
+            "note": "이름이 화면상 구별되지 않는 누름틀이 둘 이상입니다 — 이름으로 지목해 채우면 의도와 다른 칸이 채워질 수 있습니다. occurrence 대신 hwp_fields 가 돌려준 바이트를 그대로 쓰거나, 사람 확인을 거치세요.",
+        }));
     }
 
-    let file_path = &args[0];
-    let mut output_dir = "output".to_string();
-    let mut target_page: Option<u32> = None;
-    let mut show_para_marks = false;
-    let mut show_control_codes = false;
-    let mut debug_overlay = false;
-    let mut grid_mm: Option<f64> = None;
-    let mut grid_origin = GridOriginOption::Fixed((0.0_f64, 0.0_f64));
-    let mut respect_vpos_reset = false;
-    let mut font_embed_mode = rhwp::renderer::svg::FontEmbedMode::None;
-    let mut font_paths: Vec<std::path::PathBuf> = Vec::new();
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--output" | "-o" => {
-                if i + 1 < args.len() {
-                    output_dir = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    eprintln!("오류: --output 뒤에 폴더 경로가 필요합니다.");
-                    return;
-                }
-            }
-            "--page" | "-p" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<u32>() {
-                        Ok(n) => target_page = Some(n),
-                        Err(_) => {
-                            eprintln!("오류: 페이지 번호가 올바르지 않습니다.");
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --page 뒤에 페이지 번호가 필요합니다.");
-                    return;
-                }
-            }
-            "--show-para-marks" => {
-                show_para_marks = true;
-                i += 1;
-            }
-            "--show-control-codes" => {
-                show_control_codes = true;
-                i += 1;
-            }
-            "--debug-overlay" => {
-                debug_overlay = true;
-                i += 1;
-            }
-            "--respect-vpos-reset" => {
-                respect_vpos_reset = true;
-                i += 1;
-            }
-            arg if arg == "--show-grid" || arg.starts_with("--show-grid=") => {
-                grid_mm = if let Some(value) = arg.strip_prefix("--show-grid=") {
-                    match parse_grid_mm(value) {
-                        Some(v) => Some(v),
-                        None => {
-                            eprintln!(
-                                "오류: --show-grid 값이 올바르지 않습니다. 예: --show-grid=3mm"
-                            );
-                            return;
-                        }
-                    }
-                } else {
-                    Some(1.0)
-                };
-                i += 1;
-            }
-            arg if arg == "--grid-origin" || arg == "--grid-paper-origin" => {
-                if i + 1 < args.len() {
-                    match parse_grid_origin_option(&args[i + 1]) {
-                        Some(v) => grid_origin = v,
-                        None => {
-                            eprintln!(
-                                "오류: --grid-origin 값이 올바르지 않습니다. 예: --grid-origin=15mm,20mm 또는 --grid-origin=auto"
-                            );
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --grid-origin 뒤에 가로,세로 값이 필요합니다.");
-                    return;
-                }
-            }
-            arg if arg.starts_with("--grid-origin=") || arg.starts_with("--grid-paper-origin=") => {
-                let value = arg
-                    .strip_prefix("--grid-origin=")
-                    .or_else(|| arg.strip_prefix("--grid-paper-origin="))
-                    .unwrap_or_default();
-                match parse_grid_origin_option(value) {
-                    Some(v) => grid_origin = v,
-                    None => {
-                        eprintln!(
-                            "오류: --grid-origin 값이 올바르지 않습니다. 예: --grid-origin=15mm,20mm 또는 --grid-origin=auto"
-                        );
-                        return;
-                    }
-                }
-                i += 1;
-            }
-            "--font-style" => {
-                font_embed_mode = rhwp::renderer::svg::FontEmbedMode::Style;
-                i += 1;
-            }
-            "--embed-fonts" => {
-                font_embed_mode = rhwp::renderer::svg::FontEmbedMode::Subset;
-                i += 1;
-            }
-            "--embed-fonts=full" => {
-                font_embed_mode = rhwp::renderer::svg::FontEmbedMode::Full;
-                i += 1;
-            }
-            "--font-path" => {
-                if i + 1 < args.len() {
-                    font_paths.push(std::path::PathBuf::from(&args[i + 1]));
-                    i += 2;
-                } else {
-                    eprintln!("오류: --font-path 뒤에 경로가 필요합니다.");
-                    return;
-                }
-            }
-            _ => {
-                eprintln!("알 수 없는 옵션: {}", args[i]);
-                i += 1;
-            }
+    // ② 이름 하나하나의 혼합 스크립트·보이지 않는 문자.
+    for name in names {
+        for risk in ts::scan_identifier(name) {
+            findings.push(serde_json::json!({
+                "kind": risk.kind.label(),
+                "scope": "fieldName",
+                "names": [name],
+                "codepoints": risk.codepoints.iter().map(|c| ts::format_codepoint(*c))
+                    .collect::<Vec<_>>(),
+                "note": risk.kind.describe(),
+            }));
         }
     }
 
-    // 파일 읽기
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    // 문서 로드
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    // [Task #741 후속] 외부 file path 그림 영역 영역 HWP file 영역 영역 같은 dir 영역
-    // 영역 image 영역 영역 자동 load (basename 매칭).
-    if let Some(parent) = std::path::Path::new(file_path).parent() {
-        let _loaded = doc.populate_external_images_from_dir(parent);
+    if findings.is_empty() {
+        return serde_json::json!({ "status": "clean" });
     }
+    serde_json::json!({
+        "status": "warning",
+        "findingCount": findings.len(),
+        "findings": findings,
+    })
+}
 
-    if show_para_marks {
-        doc.set_show_paragraph_marks(true);
-    }
-    if show_control_codes {
-        doc.set_show_control_codes(true);
-    }
-    if debug_overlay {
-        doc.set_debug_overlay(true);
-    }
-    if respect_vpos_reset {
-        doc.set_respect_vpos_reset(true);
-    }
+/// [#3346] `search --json` 과 `batch search` 가 공유하는 봉투.
+fn search_json_value(
+    file_path: &str,
+    query: &str,
+    case_sensitive: bool,
+    matches: &[rhwp::document_core::queries::grep::GrepMatch],
+    total_match_count: usize,
+) -> serde_json::Value {
+    provenance::marked(
+        serde_json::json!({
+        "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+        "source": file_path,
+        "query": query,
+        "caseSensitive": case_sensitive,
+        "matchCount": matches.len(),
+        "totalMatchCount": total_match_count,
+        "truncated": matches.len() < total_match_count,
+        // [#3787 S7] 절단 축의 어휘를 텍스트 축(`export-text --max-chars`)과 맞춘다.
+        // `totalMatchCount - matchCount` 로 유도할 수 있는 값이지만, 유도를 요구하면
+        // "전부 봤다"는 오독이 그대로 남는다 — 생략량은 명시가 계약이다.
+        "omittedCount": total_match_count.saturating_sub(matches.len()),
+        "matches": matches,
+        }),
+        "search",
+    )
+}
 
-    let page_count = doc.page_count();
-    println!("문서 로드 완료: {} ({}페이지)", file_path, page_count);
-
-    // 출력 폴더 생성
-    let output_path = Path::new(&output_dir);
-    if !output_path.exists() {
-        if let Err(e) = fs::create_dir_all(output_path) {
-            eprintln!(
-                "오류: 출력 폴더를 생성할 수 없습니다 - {}: {}",
-                output_dir, e
-            );
-            return;
-        }
-    }
-
-    // 페이지 범위 결정
-    let pages: Vec<u32> = match target_page {
-        Some(p) => {
-            if p >= page_count {
-                eprintln!(
-                    "오류: 페이지 번호가 범위를 벗어났습니다 (0~{})",
-                    page_count - 1
-                );
-                return;
-            }
-            vec![p]
-        }
-        None => (0..page_count).collect(),
-    };
-
-    // SVG 내보내기
-    let file_stem = Path::new(file_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("page");
-
-    for page_num in &pages {
-        let svg_result = if font_embed_mode != rhwp::renderer::svg::FontEmbedMode::None {
-            doc.render_page_svg_with_fonts(*page_num, font_embed_mode, &font_paths)
-        } else {
-            doc.render_page_svg_native(*page_num)
+/// [#3787 S7] 페이지 텍스트 산출의 문자 예산 절단 — CLI `export-text --json` 과
+/// MCP `hwp_doc_text` 가 같은 규칙을 공유한다.
+///
+/// **조용히 자르지 않는다.** 거대 문서가 에이전트 컨텍스트를 밀어내는 것을 막는 게
+/// 목적이지만, 잘랐다는 사실을 숨기면 그 절단이 "전부 읽었다"는 거짓말이 된다.
+/// 그래서 두 가지를 지킨다.
+///
+/// 1. **쪽 주소를 보존한다** — 예산이 떨어져도 `pages[]` 에서 항목을 빼지 않는다.
+///    빼면 `pageCount` 가 줄어 문서가 실제보다 짧아 보인다.
+/// 2. **생략량을 남긴다** — 잘린 페이지마다 `truncated:true`·`omittedCount`(생략된
+///    문자 수)를 싣고, 봉투 최상위에 합계를 싣는다. 최상위 `truncated` 는 절단이
+///    없어도 항상 나가고(false), 페이지 항목의 두 필드는 잘린 페이지에만 붙는다.
+///
+/// `max_chars` 가 `None` 이면 무제한이다(기본값 — 종전 동작 무변경).
+fn truncate_page_texts(
+    pages: &[(u32, String)],
+    max_chars: Option<usize>,
+) -> (Vec<serde_json::Value>, usize) {
+    let mut objs = Vec::with_capacity(pages.len());
+    let mut budget = max_chars;
+    let mut omitted_total = 0usize;
+    for (page, text) in pages {
+        let total = text.chars().count();
+        let keep = match budget {
+            Some(remaining) => remaining.min(total),
+            None => total,
         };
-        match svg_result {
-            Ok(mut svg) => {
-                // 격자 오버레이 삽입
-                if let Some(mm) = grid_mm {
-                    let origin_mm = match grid_origin {
-                        GridOriginOption::Fixed(origin) => origin,
-                        GridOriginOption::AutoPaper => {
-                            match grid_paper_origin_mm(&doc, *page_num) {
-                                Some(origin) => origin,
-                                None => {
-                                    eprintln!(
-                                        "오류: 페이지 {}의 격자 기준 위치를 계산할 수 없습니다.",
-                                        page_num
-                                    );
-                                    continue;
-                                }
-                            }
-                        }
-                    };
-                    svg = insert_grid_overlay(&svg, mm, origin_mm);
-                }
-                let svg_filename = if page_count == 1 {
-                    format!("{}.svg", file_stem)
-                } else {
-                    format!("{}_{:03}.svg", file_stem, page_num + 1)
-                };
-                let svg_path = output_path.join(&svg_filename);
-
-                match fs::write(&svg_path, &svg) {
-                    Ok(_) => println!("  → {}", svg_path.display()),
-                    Err(e) => eprintln!("오류: SVG 저장 실패 - {}: {}", svg_path.display(), e),
-                }
-            }
-            Err(e) => {
-                eprintln!("오류: 페이지 {} 렌더링 실패 - {:?}", page_num, e);
-            }
+        if let Some(remaining) = budget.as_mut() {
+            *remaining -= keep;
         }
-    }
-
-    println!(
-        "내보내기 완료: {}개 SVG 파일 → {}/",
-        pages.len(),
-        output_dir
-    );
-}
-
-fn export_render_tree(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp export-render-tree <파일.hwp> [옵션] (rhwp --help 참조)");
-        return;
-    }
-
-    let file_path = &args[0];
-    let mut output_dir = "output".to_string();
-    let mut target_page: Option<u32> = None;
-    let mut show_para_marks = false;
-    let mut show_control_codes = false;
-    let mut respect_vpos_reset = false;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--output" | "-o" => {
-                if i + 1 < args.len() {
-                    output_dir = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    eprintln!("오류: --output 뒤에 폴더 경로가 필요합니다.");
-                    return;
-                }
-            }
-            "--page" | "-p" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<u32>() {
-                        Ok(n) => target_page = Some(n),
-                        Err(_) => {
-                            eprintln!("오류: 페이지 번호가 올바르지 않습니다.");
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --page 뒤에 페이지 번호가 필요합니다.");
-                    return;
-                }
-            }
-            "--show-para-marks" => {
-                show_para_marks = true;
-                i += 1;
-            }
-            "--show-control-codes" => {
-                show_control_codes = true;
-                i += 1;
-            }
-            "--respect-vpos-reset" => {
-                respect_vpos_reset = true;
-                i += 1;
-            }
-            _ => {
-                eprintln!("알 수 없는 옵션: {}", args[i]);
-                i += 1;
-            }
-        }
-    }
-
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    if let Some(parent) = std::path::Path::new(file_path).parent() {
-        let _loaded = doc.populate_external_images_from_dir(parent);
-    }
-
-    if show_para_marks {
-        doc.set_show_paragraph_marks(true);
-    }
-    if show_control_codes {
-        doc.set_show_control_codes(true);
-    }
-    if respect_vpos_reset {
-        doc.set_respect_vpos_reset(true);
-    }
-
-    let page_count = doc.page_count();
-    println!("문서 로드 완료: {} ({}페이지)", file_path, page_count);
-
-    let output_path = Path::new(&output_dir);
-    if !output_path.exists() {
-        if let Err(e) = fs::create_dir_all(output_path) {
-            eprintln!(
-                "오류: 출력 폴더를 생성할 수 없습니다 - {}: {}",
-                output_dir, e
-            );
-            return;
-        }
-    }
-
-    let pages: Vec<u32> = match target_page {
-        Some(p) => {
-            if p >= page_count {
-                eprintln!(
-                    "오류: 페이지 번호가 범위를 벗어났습니다 (0~{})",
-                    page_count - 1
-                );
-                return;
-            }
-            vec![p]
-        }
-        None => (0..page_count).collect(),
-    };
-
-    for page_num in &pages {
-        match doc.build_page_render_tree(*page_num) {
-            Ok(tree) => {
-                let json_path = output_path.join(format!("render_tree_{:03}.json", page_num + 1));
-                let json = tree.root.to_json();
-                match fs::write(&json_path, json) {
-                    Ok(_) => println!("  → {}", json_path.display()),
-                    Err(e) => {
-                        eprintln!(
-                            "오류: render tree 저장 실패 - {}: {}",
-                            json_path.display(),
-                            e
-                        )
-                    }
-                }
-            }
-            Err(e) => {
-                eprintln!("오류: 페이지 {} render tree 생성 실패 - {:?}", page_num, e);
-            }
-        }
-    }
-
-    println!(
-        "내보내기 완료: {}개 render tree JSON 파일 → {}/",
-        pages.len(),
-        output_dir
-    );
-}
-
-fn parse_grid_mm(value: &str) -> Option<f64> {
-    let trimmed = value.trim();
-    let number = trimmed
-        .strip_suffix("mm")
-        .or_else(|| trimmed.strip_suffix("MM"))
-        .unwrap_or(trimmed)
-        .trim();
-    let mm = number.parse::<f64>().ok()?;
-    if mm.is_finite() && mm > 0.0 {
-        Some(mm)
-    } else {
-        None
-    }
-}
-
-#[derive(Clone, Copy)]
-enum GridOriginOption {
-    Fixed((f64, f64)),
-    AutoPaper,
-}
-
-fn parse_grid_origin_option(value: &str) -> Option<GridOriginOption> {
-    if value.eq_ignore_ascii_case("auto") {
-        return Some(GridOriginOption::AutoPaper);
-    }
-    parse_grid_origin_mm(value).map(GridOriginOption::Fixed)
-}
-
-fn parse_grid_origin_mm(value: &str) -> Option<(f64, f64)> {
-    let (x, y) = value.split_once(',')?;
-    Some((parse_grid_mm(x)?, parse_grid_mm(y)?))
-}
-
-fn grid_paper_origin_mm(doc: &rhwp::wasm_api::HwpDocument, page_num: u32) -> Option<(f64, f64)> {
-    let page_info = doc.get_page_info_native(page_num).ok()?;
-    let page_info: serde_json::Value = serde_json::from_str(&page_info).ok()?;
-    let section_idx = page_info.get("sectionIndex")?.as_u64()? as usize;
-    let page_def = &doc
-        .document()
-        .sections
-        .get(section_idx)?
-        .section_def
-        .page_def;
-    Some((
-        hu_to_mm(page_def.margin_left),
-        hu_to_mm(page_def.margin_top + page_def.margin_header),
-    ))
-}
-
-/// SVG에 mm 단위 점 격자 오버레이를 삽입한다.
-/// export-svg 디버그용 격자는 한컴오피스의 "종이 기준 위치"를 옵션으로 맞출 수 있다.
-fn insert_grid_overlay(svg: &str, grid_mm: f64, origin_mm: (f64, f64)) -> String {
-    // SVG viewBox에서 크기 추출
-    let (width, height) = extract_svg_dimensions(svg);
-    // 96dpi: 1inch = 25.4mm, 1px = 25.4/96 = 0.2646mm.
-    let grid_size = 96.0 / 25.4 * grid_mm;
-    let origin_x = 96.0 / 25.4 * origin_mm.0;
-    let origin_y = 96.0 / 25.4 * origin_mm.1;
-
-    let g = format!("{:.4}", grid_size);
-    let ox = format!("{:.4}", origin_x);
-    let oy = format!("{:.4}", origin_y);
-    let w = format!("{:.2}", width);
-    let h = format!("{:.2}", height);
-    let defs_part = format!(
-        "<defs><pattern id=\"rhwp-grid\" x=\"{ox}\" y=\"{oy}\" width=\"{g}\" height=\"{g}\" patternUnits=\"userSpaceOnUse\"><rect x=\"0\" y=\"0\" width=\"1\" height=\"1\" fill=\"#002096\" fill-opacity=\"0.9\"/></pattern></defs>"
-    );
-    let grid_rect = format!("\n<rect width=\"{w}\" height=\"{h}\" fill=\"url(#rhwp-grid)\"/>");
-    let grid_defs =
-        format!("{defs_part}\n<rect width=\"{w}\" height=\"{h}\" fill=\"url(#rhwp-grid)\"/>\n");
-
-    // 페이지 배경(fill="#ffffff") rect 직후에 격자를 삽입
-    // 이렇게 해야 흰색 배경 위에, 본문 컨텐츠 아래에 격자가 표시됨
-    let bg_pattern = "fill=\"#ffffff\"/>";
-    if let Some(pos) = svg.find(bg_pattern) {
-        let insert_pos = pos + bg_pattern.len();
-        // defs는 SVG 시작 부분에, 격자 rect는 배경 뒤에
-        // defs를 <svg> 태그 직후에 삽입
-        let mut result = svg.to_string();
-        // 배경 rect 뒤에 격자 rect 삽입
-        result.insert_str(insert_pos, &grid_rect);
-        // <svg ...>\n 직후에 defs 삽입
-        if let Some(svg_end) = result.find(">\n") {
-            result.insert_str(svg_end + 2, &format!("{}\n", defs_part));
-        }
-        result
-    } else {
-        // 배경 rect가 없으면 기존 방식
-        if let Some(pos) = svg.find(">\n") {
-            let insert_pos = pos + 2;
-            format!("{}{}{}", &svg[..insert_pos], grid_defs, &svg[insert_pos..])
+        let omitted = total - keep;
+        omitted_total += omitted;
+        let kept: String = if omitted == 0 {
+            text.clone()
         } else {
-            svg.to_string()
+            text.chars().take(keep).collect()
+        };
+        let mut obj = serde_json::json!({ "page": page, "text": kept });
+        if omitted > 0 {
+            obj["truncated"] = serde_json::json!(true);
+            obj["omittedCount"] = serde_json::json!(omitted);
         }
+        objs.push(obj);
     }
+    (objs, omitted_total)
 }
 
-/// SVG의 width/height 속성 또는 viewBox에서 크기를 추출한다.
-fn extract_svg_dimensions(svg: &str) -> (f64, f64) {
-    // viewBox="0 0 W H" 패턴에서 추출
-    if let Some(vb_start) = svg.find("viewBox=\"") {
-        let vb = &svg[vb_start + 9..];
-        if let Some(vb_end) = vb.find('"') {
-            let parts: Vec<&str> = vb[..vb_end].split_whitespace().collect();
-            if parts.len() == 4 {
-                let w: f64 = parts[2].parse().unwrap_or(800.0);
-                let h: f64 = parts[3].parse().unwrap_or(1100.0);
-                return (w, h);
-            }
-        }
-    }
-    // width/height 속성에서 추출
-    let w = extract_attr_f64(svg, "width").unwrap_or(800.0);
-    let h = extract_attr_f64(svg, "height").unwrap_or(1100.0);
-    (w, h)
-}
+/// [#3407] `title` 이 훑는 앞쪽 페이지 수 상한 — 표지가 이미지·빈 쪽인 문서의
+/// fallback 범위. digest 발췌(`DIGEST_EXCERPT_PAGES`)와 같은 "앞 3쪽" 어휘를 쓴다.
+const TITLE_SCAN_PAGES: u32 = 3;
 
-fn extract_attr_f64(svg: &str, attr: &str) -> Option<f64> {
-    let pattern = format!("{}=\"", attr);
-    if let Some(start) = svg.find(&pattern) {
-        let val = &svg[start + pattern.len()..];
-        if let Some(end) = val.find('"') {
-            return val[..end].trim_end_matches("px").parse().ok();
+/// [#3407] 문서 제목 best-effort 추출 — 대량 아카이브 1-pass 대장화용.
+///
+/// 렌더된 페이지 텍스트(`extract_page_text_native`, `export-text --json` 과 같은
+/// 원천)의 첫 의미 줄(trim 후 비어있지 않은 첫 줄)을 돌려준다. 종전 2-pass
+/// 대장화(`batch info` + 문서별 `export-text` 첫 줄 파싱)가 소비자 쪽에서 하던
+/// 규칙을 엔진이 한 번만 정의한다. 표지가 이미지라 첫 쪽 텍스트가 비면 다음
+/// 쪽으로 내려가며(앞 `TITLE_SCAN_PAGES` 쪽까지), 그래도 없으면 `None`(JSON
+/// null)이다. 값 자체는 계약이 아닌 best-effort 필드이고, 추출 실패도 문서
+/// 메타 조회를 막지 않도록 조용히 다음 쪽으로 넘어간다.
+fn document_title(doc: &rhwp::wasm_api::HwpDocument) -> Option<String> {
+    for page in 0..doc.page_count().min(TITLE_SCAN_PAGES) {
+        let Ok(text) = doc.extract_page_text_native(page) else {
+            continue;
+        };
+        if let Some(line) = text.lines().map(str::trim).find(|l| !l.is_empty()) {
+            return Some(line.to_string());
         }
     }
     None
 }
 
-#[cfg(not(feature = "native-skia"))]
-fn export_png(_args: &[String]) {
-    eprintln!("오류: export-png 명령은 native-skia feature 가 활성화되어야 합니다.");
-    eprintln!("       cargo build --release --features native-skia");
-}
-
-#[cfg(feature = "native-skia")]
-fn export_png(args: &[String]) {
-    use rhwp::document_core::queries::rendering::{PngExportOptions, VlmTarget};
-
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp export-png <파일.hwp> [옵션] (rhwp --help 참조)");
-        return;
-    }
-
-    let file_path = &args[0];
-    let mut output_dir = "output".to_string();
-    let mut target_page: Option<u32> = None;
-    let mut font_paths: Vec<std::path::PathBuf> = Vec::new();
-    let mut scale: Option<f64> = None;
-    let mut max_dimension: Option<i32> = None;
-    let mut vlm_target: Option<VlmTarget> = None;
-    let mut dpi: Option<f64> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--output" | "-o" => {
-                if i + 1 < args.len() {
-                    output_dir = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    eprintln!("오류: --output 뒤에 폴더 경로가 필요합니다.");
-                    return;
-                }
-            }
-            "--page" | "-p" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<u32>() {
-                        Ok(n) => target_page = Some(n),
-                        Err(_) => {
-                            eprintln!("오류: 페이지 번호가 올바르지 않습니다.");
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --page 뒤에 페이지 번호가 필요합니다.");
-                    return;
-                }
-            }
-            "--font-path" => {
-                if i + 1 < args.len() {
-                    font_paths.push(std::path::PathBuf::from(&args[i + 1]));
-                    i += 2;
-                } else {
-                    eprintln!("오류: --font-path 뒤에 경로가 필요합니다.");
-                    return;
-                }
-            }
-            "--scale" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<f64>() {
-                        Ok(s) if s.is_finite() && s > 0.0 => scale = Some(s),
-                        _ => {
-                            eprintln!("오류: --scale 값이 올바르지 않습니다 (양수 실수 필요).");
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --scale 뒤에 배율 값이 필요합니다.");
-                    return;
-                }
-            }
-            "--max-dimension" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<i32>() {
-                        Ok(n) if n > 0 => max_dimension = Some(n),
-                        _ => {
-                            eprintln!(
-                                "오류: --max-dimension 값이 올바르지 않습니다 (양수 정수 필요)."
-                            );
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --max-dimension 뒤에 픽셀 값이 필요합니다.");
-                    return;
-                }
-            }
-            "--dpi" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<f64>() {
-                        Ok(d) if d.is_finite() && d > 0.0 => dpi = Some(d),
-                        _ => {
-                            eprintln!("오류: --dpi 값이 올바르지 않습니다 (양수 실수 필요).");
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --dpi 뒤에 DPI 값이 필요합니다.");
-                    return;
-                }
-            }
-            "--vlm-target" => {
-                if i + 1 < args.len() {
-                    match VlmTarget::from_str(&args[i + 1]) {
-                        Some(t) => vlm_target = Some(t),
-                        None => {
-                            eprintln!(
-                                "오류: --vlm-target 값이 올바르지 않습니다 (지원: {}).",
-                                VlmTarget::all_names()
-                            );
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --vlm-target 뒤에 프리셋 이름이 필요합니다.");
-                    return;
-                }
-            }
-            _ => {
-                eprintln!("알 수 없는 옵션: {}", args[i]);
-                i += 1;
-            }
-        }
-    }
-
-    let png_options = PngExportOptions {
-        scale,
-        max_dimension,
-        vlm_target,
-        dpi,
-        font_paths: font_paths.clone(),
-    };
-
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let core = match rhwp::document_core::DocumentCore::from_bytes(&data) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {:?}", e);
-            return;
-        }
-    };
-
-    let page_count = core.page_count();
-    println!("문서 로드 완료: {} ({}페이지)", file_path, page_count);
-
-    let output_path = Path::new(&output_dir);
-    if !output_path.exists() {
-        if let Err(e) = fs::create_dir_all(output_path) {
-            eprintln!(
-                "오류: 출력 폴더를 생성할 수 없습니다 - {}: {}",
-                output_dir, e
-            );
-            return;
-        }
-    }
-
-    let pages: Vec<u32> = match target_page {
-        Some(p) => {
-            if p >= page_count as u32 {
-                eprintln!(
-                    "오류: 페이지 번호가 범위를 벗어났습니다 (0~{})",
-                    page_count - 1
-                );
-                return;
-            }
-            vec![p]
-        }
-        None => (0..page_count as u32).collect(),
-    };
-
-    let file_stem = Path::new(file_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("page");
-
-    let total_pages = pages.len();
-    let mut success = 0;
-    let mut total_bytes = 0usize;
-
-    for page_num in &pages {
-        let has_options = png_options.scale.is_some()
-            || png_options.max_dimension.is_some()
-            || png_options.vlm_target.is_some()
-            || png_options.dpi.is_some();
-        let result = if has_options {
-            core.render_page_png_native_with_export_options(*page_num, &png_options)
-        } else if !font_paths.is_empty() {
-            core.render_page_png_native_with_fonts(*page_num, &font_paths)
-        } else {
-            core.render_page_png_native(*page_num)
-        };
-        match result {
-            Ok(png_bytes) => {
-                let png_filename = if total_pages == 1 {
-                    format!("{}.png", file_stem)
-                } else {
-                    format!("{}_{:03}.png", file_stem, page_num + 1)
-                };
-                let png_path = output_path.join(&png_filename);
-                if let Err(e) = fs::write(&png_path, &png_bytes) {
-                    eprintln!("오류: 페이지 {} PNG 저장 실패 - {}", page_num + 1, e);
-                    continue;
-                }
-                println!("  → {} ({} bytes)", png_path.display(), png_bytes.len());
-                total_bytes += png_bytes.len();
-                success += 1;
-            }
-            Err(e) => {
-                eprintln!("오류: 페이지 {} 렌더링 실패 - {:?}", page_num + 1, e);
-            }
-        }
-    }
-
-    println!(
-        "내보내기 완료: {}개 PNG 파일 → {}/ ({:.1} MB)",
-        success,
-        output_dir,
-        total_bytes as f64 / 1024.0 / 1024.0
-    );
-}
-
-fn export_pdf(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp export-pdf <파일.hwp> [-o 출력.pdf] [-p 페이지]");
-        return;
-    }
-
-    #[cfg(target_arch = "wasm32")]
-    {
-        eprintln!("오류: PDF 내보내기는 native 빌드에서만 지원됩니다.");
-        return;
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let file_path = &args[0];
-        let mut output_file = String::new();
-        let mut target_page: Option<u32> = None;
-
-        let mut i = 1;
-        while i < args.len() {
-            match args[i].as_str() {
-                "--output" | "-o" => {
-                    if i + 1 < args.len() {
-                        output_file = args[i + 1].clone();
-                        i += 2;
-                    } else {
-                        eprintln!("오류: --output 뒤에 파일 경로가 필요합니다.");
-                        return;
-                    }
-                }
-                "--page" | "-p" => {
-                    if i + 1 < args.len() {
-                        match args[i + 1].parse::<u32>() {
-                            Ok(n) => target_page = Some(n),
-                            Err(_) => {
-                                eprintln!("오류: 페이지 번호가 올바르지 않습니다.");
-                                return;
-                            }
-                        }
-                        i += 2;
-                    } else {
-                        eprintln!("오류: --page 뒤에 페이지 번호가 필요합니다.");
-                        return;
-                    }
-                }
-                _ => {
-                    i += 1;
-                }
-            }
-        }
-
-        // 기본 출력 파일명
-        if output_file.is_empty() {
-            let stem = Path::new(file_path)
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("output");
-            output_file = format!("output/{}.pdf", stem);
-        }
-
-        let data = match fs::read(file_path) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-                return;
-            }
-        };
-
-        let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-            Ok(d) => d,
-            Err(e) => {
-                eprintln!("오류: HWP 파싱 실패 - {}", e);
-                return;
-            }
-        };
-
-        let page_count = doc.page_count();
-        println!("문서 로드 완료: {} ({}페이지)", file_path, page_count);
-
-        // 출력 디렉토리 생성
-        if let Some(parent) = Path::new(&output_file).parent() {
-            if !parent.exists() {
-                if let Err(e) = fs::create_dir_all(parent) {
-                    eprintln!("오류: 출력 디렉토리를 만들 수 없습니다 - {}", e);
-                    return;
-                }
-            }
-        }
-
-        // 페이지 범위 결정
-        let pages: Vec<u32> = match target_page {
-            Some(p) => {
-                if p >= page_count {
-                    eprintln!(
-                        "오류: 페이지 번호가 범위를 벗어났습니다 (0~{})",
-                        page_count - 1
-                    );
-                    return;
-                }
-                vec![p]
-            }
-            None => (0..page_count).collect(),
-        };
-
-        let pdf_bytes = match doc.render_pages_pdf_native(&pages) {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                eprintln!("오류: PDF 변환 실패 - {}", e);
-                return;
-            }
-        };
-        if let Err(e) = fs::write(&output_file, &pdf_bytes) {
-            eprintln!("오류: PDF 저장 실패 - {}", e);
-            return;
-        }
-        println!(
-            "  → {} ({}KB, {}페이지)",
-            output_file,
-            pdf_bytes.len() / 1024,
-            pages.len()
-        );
-        println!("PDF 내보내기 완료");
-    }
-}
-
-fn export_text(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp export-text <파일.hwp> [옵션] (rhwp --help 참조)");
-        return;
-    }
-
-    let file_path = &args[0];
-    let mut output_dir = "output".to_string();
-    let mut target_page: Option<u32> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--output" | "-o" => {
-                if i + 1 < args.len() {
-                    output_dir = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    eprintln!("오류: --output 뒤에 폴더 경로가 필요합니다.");
-                    return;
-                }
-            }
-            "--page" | "-p" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<u32>() {
-                        Ok(n) => target_page = Some(n),
-                        Err(_) => {
-                            eprintln!("오류: 페이지 번호가 올바르지 않습니다.");
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --page 뒤에 페이지 번호가 필요합니다.");
-                    return;
-                }
-            }
-            _ => {
-                eprintln!("알 수 없는 옵션: {}", args[i]);
-                i += 1;
-            }
-        }
-    }
-
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    let page_count = doc.page_count();
-    println!("문서 로드 완료: {} ({}페이지)", file_path, page_count);
-    if page_count == 0 {
-        eprintln!("오류: 문서에 페이지가 없습니다.");
-        return;
-    }
-
-    let output_path = Path::new(&output_dir);
-    if !output_path.exists() {
-        if let Err(e) = fs::create_dir_all(output_path) {
-            eprintln!(
-                "오류: 출력 폴더를 생성할 수 없습니다 - {}: {}",
-                output_dir, e
-            );
-            return;
-        }
-    }
-
-    let pages: Vec<u32> = match target_page {
-        Some(p) => {
-            if p >= page_count {
-                eprintln!(
-                    "오류: 페이지 번호가 범위를 벗어났습니다 (0~{})",
-                    page_count - 1
-                );
-                return;
-            }
-            vec![p]
-        }
-        None => (0..page_count).collect(),
-    };
-
-    let file_stem = Path::new(file_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("page");
-
-    for page_num in &pages {
-        match doc.extract_page_text_native(*page_num) {
-            Ok(mut text) => {
-                if !text.ends_with('\n') {
-                    text.push('\n');
-                }
-
-                let txt_filename = if page_count == 1 {
-                    format!("{}.txt", file_stem)
-                } else {
-                    format!("{}_{:03}.txt", file_stem, page_num + 1)
-                };
-                let txt_path = output_path.join(&txt_filename);
-
-                match fs::write(&txt_path, text.as_bytes()) {
-                    Ok(_) => println!("  → {}", txt_path.display()),
-                    Err(e) => eprintln!("오류: TXT 저장 실패 - {}: {}", txt_path.display(), e),
-                }
-            }
-            Err(e) => {
-                eprintln!("오류: 페이지 {} 텍스트 추출 실패 - {:?}", page_num, e);
-            }
-        }
-    }
-
-    println!(
-        "텍스트 내보내기 완료: {}개 TXT 파일 → {}/",
-        pages.len(),
-        output_dir
-    );
-}
-
-fn export_markdown(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp export-markdown <파일.hwp> [옵션] (rhwp --help 참조)");
-        return;
-    }
-
-    let file_path = &args[0];
-    let mut output_dir = "output".to_string();
-    let mut target_page: Option<u32> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--output" | "-o" => {
-                if i + 1 < args.len() {
-                    output_dir = args[i + 1].clone();
-                    i += 2;
-                } else {
-                    eprintln!("오류: --output 뒤에 폴더 경로가 필요합니다.");
-                    return;
-                }
-            }
-            "--page" | "-p" => {
-                if i + 1 < args.len() {
-                    match args[i + 1].parse::<u32>() {
-                        Ok(n) => target_page = Some(n),
-                        Err(_) => {
-                            eprintln!("오류: 페이지 번호가 올바르지 않습니다.");
-                            return;
-                        }
-                    }
-                    i += 2;
-                } else {
-                    eprintln!("오류: --page 뒤에 페이지 번호가 필요합니다.");
-                    return;
-                }
-            }
-            _ => {
-                eprintln!("알 수 없는 옵션: {}", args[i]);
-                i += 1;
-            }
-        }
-    }
-
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    let page_count = doc.page_count();
-    println!("문서 로드 완료: {} ({}페이지)", file_path, page_count);
-    if page_count == 0 {
-        eprintln!("오류: 문서에 페이지가 없습니다.");
-        return;
-    }
-
-    let output_path = Path::new(&output_dir);
-    if !output_path.exists() {
-        if let Err(e) = fs::create_dir_all(output_path) {
-            eprintln!(
-                "오류: 출력 폴더를 생성할 수 없습니다 - {}: {}",
-                output_dir, e
-            );
-            return;
-        }
-    }
-
-    let pages: Vec<u32> = match target_page {
-        Some(p) => {
-            if p >= page_count {
-                eprintln!(
-                    "오류: 페이지 번호가 범위를 벗어났습니다 (0~{})",
-                    page_count - 1
-                );
-                return;
-            }
-            vec![p]
-        }
-        None => (0..page_count).collect(),
-    };
-
-    let file_stem = Path::new(file_path)
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("page");
-
-    let assets_dir_name = format!("{}_assets", file_stem);
-    let assets_dir_path = output_path.join(&assets_dir_name);
-    let mut written_image_count: usize = 0;
-
-    let mime_to_ext = |mime: &str| -> &'static str {
-        match mime {
-            "image/png" => "png",
-            "image/jpeg" => "jpg",
-            "image/gif" => "gif",
-            "image/bmp" => "bmp",
-            "image/webp" => "webp",
-            _ => "bin",
-        }
-    };
-
-    for page_num in &pages {
-        match doc.extract_page_markdown_with_images_native(*page_num) {
-            Ok((mut markdown, image_refs)) => {
-                for (img_idx, (sec_idx, para_idx, control_idx, bin_data_id)) in
-                    image_refs.iter().enumerate()
-                {
-                    let token = format!("[[RHWP_IMAGE:{}]]", img_idx + 1);
-
-                    let try_control = match (sec_idx, para_idx, control_idx) {
-                        (Some(si), Some(pi), Some(ci)) => Some((*si, *pi, *ci)),
-                        _ => None,
-                    };
-
-                    let (mime, image_data) = if let Some((si, pi, ci)) = try_control {
-                        match (
-                            doc.get_control_image_mime_native(si, pi, &[], ci),
-                            doc.get_control_image_data_native(si, pi, &[], ci),
-                        ) {
-                            (Ok(m), Ok(d)) => (m, d),
-                            _ => {
-                                if *bin_data_id == 0 {
-                                    eprintln!(
-                                        "경고: 페이지 {} 이미지 추출 실패 (s{} p{} c{}), fallback bin_data_id 없음",
-                                        page_num, si, pi, ci
-                                    );
-                                    markdown = markdown.replace(&token, "");
-                                    continue;
-                                }
-                                let fb_mime = match doc.get_bin_data_image_mime_native(*bin_data_id)
-                                {
-                                    Ok(m) => m,
-                                    Err(e) => {
-                                        eprintln!(
-                                            "경고: 페이지 {} 이미지 MIME fallback 실패 (bin={}): {:?}",
-                                            page_num, bin_data_id, e
-                                        );
-                                        markdown = markdown.replace(&token, "");
-                                        continue;
-                                    }
-                                };
-                                let fb_data = match doc.get_bin_data_image_data_native(*bin_data_id)
-                                {
-                                    Ok(d) => d,
-                                    Err(e) => {
-                                        eprintln!(
-                                            "경고: 페이지 {} 이미지 데이터 fallback 실패 (bin={}): {:?}",
-                                            page_num, bin_data_id, e
-                                        );
-                                        markdown = markdown.replace(&token, "");
-                                        continue;
-                                    }
-                                };
-                                (fb_mime, fb_data)
-                            }
-                        }
-                    } else {
-                        if *bin_data_id == 0 {
-                            eprintln!(
-                                "경고: 페이지 {} 이미지 추출 실패 (문서 좌표 없음, bin_data_id=0)",
-                                page_num
-                            );
-                            markdown = markdown.replace(&token, "");
-                            continue;
-                        }
-                        let fb_mime = match doc.get_bin_data_image_mime_native(*bin_data_id) {
-                            Ok(m) => m,
-                            Err(e) => {
-                                eprintln!(
-                                    "경고: 페이지 {} 이미지 MIME fallback 실패 (bin={}): {:?}",
-                                    page_num, bin_data_id, e
-                                );
-                                markdown = markdown.replace(&token, "");
-                                continue;
-                            }
-                        };
-                        let fb_data = match doc.get_bin_data_image_data_native(*bin_data_id) {
-                            Ok(d) => d,
-                            Err(e) => {
-                                eprintln!(
-                                    "경고: 페이지 {} 이미지 데이터 fallback 실패 (bin={}): {:?}",
-                                    page_num, bin_data_id, e
-                                );
-                                markdown = markdown.replace(&token, "");
-                                continue;
-                            }
-                        };
-                        (fb_mime, fb_data)
-                    };
-
-                    if !assets_dir_path.exists() {
-                        if let Err(e) = fs::create_dir_all(&assets_dir_path) {
-                            eprintln!(
-                                "오류: 이미지 출력 폴더 생성 실패 - {}: {}",
-                                assets_dir_path.display(),
-                                e
-                            );
-                            markdown = markdown.replace(&token, "");
-                            continue;
-                        }
-                    }
-
-                    let ext = mime_to_ext(&mime);
-                    let image_filename = format!(
-                        "{}_p{:03}_img{:03}.{}",
-                        file_stem,
-                        page_num + 1,
-                        img_idx + 1,
-                        ext
-                    );
-                    let image_path = assets_dir_path.join(&image_filename);
-
-                    if let Err(e) = fs::write(&image_path, &image_data) {
-                        eprintln!("경고: 이미지 저장 실패 - {}: {}", image_path.display(), e);
-                        markdown = markdown.replace(&token, "");
-                        continue;
-                    }
-
-                    let image_link = format!(
-                        "![image {}]({}/{})",
-                        img_idx + 1,
-                        assets_dir_name,
-                        image_filename
-                    );
-                    markdown = markdown.replace(&token, &image_link);
-                    written_image_count += 1;
-                }
-
-                if !markdown.ends_with('\n') {
-                    markdown.push('\n');
-                }
-
-                let md_filename = if page_count == 1 {
-                    format!("{}.md", file_stem)
-                } else {
-                    format!("{}_{:03}.md", file_stem, page_num + 1)
-                };
-                let md_path = output_path.join(&md_filename);
-
-                match fs::write(&md_path, markdown.as_bytes()) {
-                    Ok(_) => println!("  → {}", md_path.display()),
-                    Err(e) => eprintln!("오류: Markdown 저장 실패 - {}: {}", md_path.display(), e),
-                }
-            }
-            Err(e) => {
-                eprintln!("오류: 페이지 {} Markdown 생성 실패 - {:?}", page_num, e);
-            }
-        }
-    }
-
-    if written_image_count > 0 {
-        println!(
-            "Markdown 내보내기 완료: {}개 MD 파일, {}개 이미지 → {}/",
-            pages.len(),
-            written_image_count,
-            output_dir
-        );
-    } else {
-        println!(
-            "Markdown 내보내기 완료: {}개 MD 파일 → {}/",
-            pages.len(),
-            output_dir
-        );
-    }
-}
-
-fn show_info(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        return;
-    }
-
-    let file_path = &args[0];
-
-    // 파일 읽기
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let file_size = data.len();
-
-    // HWP 파싱
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
+/// [#3237] `info --json`·`batch info --json` 이 공유하는 문서 메타 JSON 레코드.
+/// `schemaVersion` 이 계약이며 필드 추가는 허용, 변경·삭제는 계약 테스트가 잡는다.
+fn info_json_value(
+    file_path: &str,
+    file_size: usize,
+    detected_format: rhwp::parser::FileFormat,
+    doc: &rhwp::wasm_api::HwpDocument,
+) -> serde_json::Value {
     let document = doc.document();
-
-    println!("파일: {}", file_path);
-    println!("크기: {} bytes", file_size);
-    println!(
-        "버전: {}.{}.{}.{}",
-        document.header.version.major,
-        document.header.version.minor,
-        document.header.version.build,
-        document.header.version.revision,
-    );
-    println!(
-        "압축: {}",
-        if document.header.compressed {
-            "예"
-        } else {
-            "아니오"
-        }
-    );
-    println!(
-        "암호화: {}",
-        if document.header.encrypted {
-            "예"
-        } else {
-            "아니오"
-        }
-    );
-    println!(
-        "배포용: {}",
-        if document.header.distribution {
-            "예"
-        } else {
-            "아니오"
-        }
-    );
-    println!("구역 수: {}", document.sections.len());
-    println!("페이지 수: {}", doc.page_count());
-
-    // 용지 정보
-    for (sec_idx, section) in document.sections.iter().enumerate() {
-        let page_def = &section.section_def.page_def;
-        let orientation = if page_def.landscape {
-            "가로"
-        } else {
-            "세로"
-        };
-        println!(
-            "구역{} 용지: {}×{} HWPUNIT, 방향={} (여백: 좌{} 우{} 상{} 하{})",
-            sec_idx,
-            page_def.width,
-            page_def.height,
-            orientation,
-            page_def.margin_left,
-            page_def.margin_right,
-            page_def.margin_top,
-            page_def.margin_bottom,
-        );
-        println!(
-            "  머리말여백={} 꼬리말여백={} 제본여백={}",
-            page_def.margin_header, page_def.margin_footer, page_def.margin_gutter
-        );
-        if section.section_def.hide_empty_line {
-            println!("  빈 줄 감추기: 활성");
-        }
-    }
-
-    // 폰트 목록
-    let lang_names = ["한글", "영어", "한자", "일어", "기타", "기호", "사용자"];
-    for (i, fonts) in document.doc_info.font_faces.iter().enumerate() {
-        if !fonts.is_empty() {
-            let name = if i < lang_names.len() {
-                lang_names[i]
-            } else {
-                "기타"
-            };
-            let font_names: Vec<String> = fonts
-                .iter()
-                .enumerate()
-                .map(|(idx, f)| format!("[{}]{}", idx, f.name))
-                .collect();
-            println!("폰트({}): {}", name, font_names.join(", "));
-        }
-    }
-
-    // 스타일 목록
-    if !document.doc_info.styles.is_empty() {
-        let style_names: Vec<&str> = document
-            .doc_info
-            .styles
-            .iter()
-            .map(|s| s.local_name.as_str())
-            .collect();
-        println!("스타일: {}", style_names.join(", "));
-    }
-
-    // 문단 통계
-    let total_paras: usize = document.sections.iter().map(|s| s.paragraphs.len()).sum();
-    println!("총 문단 수: {}", total_paras);
-
-    // [Task #554] HWP3 → HWP5 변환본 식별 휴리스틱 정보
-    // 한컴이 HWP3 → HWP5 변환 시 ParaShape/CharShape 를 거의 재사용하지 않고 매우 적은
-    // 수만 생성한다. 직접 작성본은 작성자가 다양한 스타일을 사용하므로 비율이 paragraph
-    // 와 비슷하거나 더 높다. 임계값 < 0.05 / < 0.15 로 27 fixture 100% 분류 (Stage 1).
-    let ps_count = document.doc_info.para_shapes.len();
-    let cs_count = document.doc_info.char_shapes.len();
-    if total_paras > 0 {
-        let ps_ratio = ps_count as f64 / total_paras as f64;
-        let cs_ratio = cs_count as f64 / total_paras as f64;
-        let origin = if total_paras > 50 && ps_ratio < 0.05 && cs_ratio < 0.15 {
-            "HWP3 변환본 추정 (margin_bottom -1600 HU 보정 적용)"
-        } else if total_paras <= 50 {
-            "판정 불가 (문단 수 ≤ 50, 비율 왜곡 회피)"
-        } else {
-            "한컴 한글 직접 작성 추정"
-        };
-        println!("ParaShape: {} (PS/문단 = {:.3})", ps_count, ps_ratio);
-        println!("CharShape: {} (CS/문단 = {:.3})", cs_count, cs_ratio);
-        println!("Origin 추정: {}", origin);
-    }
-
-    // BinData 정보
-    if !document.doc_info.bin_data_list.is_empty() {
-        println!("BinData:");
-        for (idx, bd) in document.doc_info.bin_data_list.iter().enumerate() {
-            let type_str = match bd.data_type {
-                rhwp::model::bin_data::BinDataType::Link => "Link",
-                rhwp::model::bin_data::BinDataType::Embedding => "Embedding",
-                rhwp::model::bin_data::BinDataType::Storage => "Storage",
-            };
-            let ext = bd.extension.as_deref().unwrap_or("?");
-            // 로드된 데이터 크기 확인
-            let loaded_size = document
-                .bin_data_content
-                .iter()
-                .find(|c| c.id == bd.storage_id)
-                .map(|c| c.data.len())
-                .unwrap_or(0);
-            println!(
-                "  [{}] {} (ID: {}, ext: {}, loaded: {} bytes)",
-                idx, type_str, bd.storage_id, ext, loaded_size
-            );
-        }
-    }
-
-    // 테이블 및 그림 정보
-    use rhwp::model::control::Control;
-    let mut table_idx = 0;
-    let mut picture_idx = 0;
-
-    fn count_pictures(ctrl: &Control, picture_idx: &mut usize, location: &str) {
-        match ctrl {
-            Control::Picture(pic) => {
-                *picture_idx += 1;
-                println!(
-                    "그림{} [{}]: bin_data_id={}, size={}×{}",
-                    *picture_idx,
-                    location,
-                    pic.image_attr.bin_data_id,
-                    pic.common.width,
-                    pic.common.height,
-                );
-            }
-            Control::Table(table) => {
-                // 표 내부 셀의 문단에서도 그림 검색
-                for (cell_idx, cell) in table.cells.iter().enumerate() {
-                    for (cp_idx, cp) in cell.paragraphs.iter().enumerate() {
-                        for cc in &cp.controls {
-                            let loc = format!("{}→셀{}:문단{}", location, cell_idx, cp_idx);
-                            count_pictures(cc, picture_idx, &loc);
-                        }
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-
-    for (sec_idx, section) in document.sections.iter().enumerate() {
-        for (para_idx, para) in section.paragraphs.iter().enumerate() {
-            for ctrl in &para.controls {
-                let location = format!("구역{}:문단{}", sec_idx, para_idx);
-                match ctrl {
-                    Control::Table(table) => {
-                        table_idx += 1;
-                        let page_break_str = match table.page_break {
-                            rhwp::model::table::TablePageBreak::None => "나누지 않음",
-                            rhwp::model::table::TablePageBreak::CellBreak => "셀 단위 나눔",
-                            rhwp::model::table::TablePageBreak::RowBreak => "나눔(행 단위)",
-                        };
-                        println!(
-                            "표{} [{}]: {}행×{}열, 셀 {}개, 쪽나눔={} (attr=0x{:08x}), 제목반복={}",
-                            table_idx,
-                            location,
-                            table.row_count,
-                            table.col_count,
-                            table.cells.len(),
-                            page_break_str,
-                            table.raw_table_record_attr,
-                            table.repeat_header,
-                        );
-                        count_pictures(ctrl, &mut picture_idx, &location);
-                    }
-                    Control::Picture(_) => {
-                        count_pictures(ctrl, &mut picture_idx, &location);
-                    }
-                    Control::Shape(shape) => {
-                        use rhwp::model::shape::ShapeObject;
-                        let s = shape.as_ref();
-                        let shape_type = s.shape_name();
-                        let common = s.common();
-                        let border_info = match shape.as_ref() {
-                            ShapeObject::Rectangle(r) => format!(
-                                ", border(color={:#010x}, width={}, attr={:#010x})",
-                                r.drawing.border_line.color,
-                                r.drawing.border_line.width,
-                                r.drawing.border_line.attr,
-                            ),
-                            ShapeObject::Line(l) => format!(
-                                ", border(color={:#010x}, width={}, attr={:#010x})",
-                                l.drawing.border_line.color,
-                                l.drawing.border_line.width,
-                                l.drawing.border_line.attr,
-                            ),
-                            _ => String::new(),
-                        };
-                        println!(
-                            "도형 [{}]: {}, size={}×{}, treat_as_char={}{}",
-                            location,
-                            shape_type,
-                            common.width,
-                            common.height,
-                            common.treat_as_char,
-                            border_info,
-                        );
-                        // 그룹 자식 상세 정보
-                        if let ShapeObject::Group(g) = shape.as_ref() {
-                            for (i, child) in g.children.iter().enumerate() {
-                                let ctype = child.shape_name();
-                                let cattr = child.shape_attr();
-                                let eff_w = (cattr.current_width as f64 * cattr.render_sx) as i32;
-                                let eff_h = (cattr.current_height as f64 * cattr.render_sy) as i32;
-                                println!("  자식[{}]: {}, orig={}×{}, scale=({:.3},{:.3}), eff={}×{} at ({:.0},{:.0})",
-                                    i, ctype,
-                                    cattr.current_width, cattr.current_height,
-                                    cattr.render_sx, cattr.render_sy,
-                                    eff_w, eff_h,
-                                    cattr.render_tx, cattr.render_ty);
-                            }
-                        }
-                    }
-                    _ => {}
-                }
-            }
-        }
-    }
-}
-
-/// HWPUNIT(u32)을 mm로 변환
-fn hu_to_mm(hu: u32) -> f64 {
-    hu as f64 * 25.4 / 7200.0
-}
-
-/// HWPUNIT(i32)을 mm로 변환
-fn hu_to_mm_i(hu: i32) -> f64 {
-    hu as f64 * 25.4 / 7200.0
-}
-
-fn dump_note_shape(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("사용법: rhwp dump-note-shape <파일.hwp|파일.hwpx>");
-        return;
-    }
-
-    let file_path = &args[0];
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
+    let format_str = match detected_format {
+        rhwp::parser::FileFormat::Hwp => "hwp5",
+        rhwp::parser::FileFormat::Hwpx => "hwpx",
+        rhwp::parser::FileFormat::Hwp3 => "hwp3",
+        rhwp::parser::FileFormat::Hml => "hml",
+        // 파싱이 성공한 뒤에는 도달하지 않지만, 계약상 문자열은 고정해 둔다.
+        rhwp::parser::FileFormat::DrmProtected => "drm-protected",
+        rhwp::parser::FileFormat::Empty => "empty",
+        rhwp::parser::FileFormat::Unknown => "unknown",
     };
-
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
+    let version = if detected_format == rhwp::parser::FileFormat::Hml {
+        serde_json::Value::Null
+    } else {
+        serde_json::Value::String(format!(
+            "{}.{}.{}.{}",
+            document.header.version.major,
+            document.header.version.minor,
+            document.header.version.build,
+            document.header.version.revision,
+        ))
     };
-
-    let sections: Vec<serde_json::Value> = doc
-        .document()
-        .sections
+    // DOCINFO는 한글·영어·한자·일어·기타·기호·사용자 글꼴군을 따로 보관한다.
+    // `info --json`은 문서 인벤토리 용도이므로 첫 번째(한글) 군만이 아니라 선언된
+    // 모든 글꼴군을 문서 순서대로 평탄화해 내보낸다. 같은 이름이 여러 군에 있으면
+    // 소비자가 출처별 필요에 따라 중복을 보존하거나 제거할 수 있게 그대로 남긴다.
+    let fonts: Vec<String> = document
+        .doc_info
+        .font_faces
         .iter()
-        .enumerate()
-        .map(|(idx, section)| {
-            serde_json::json!({
-                "section": idx,
-                "footnoteShape": note_shape_json(&section.section_def.footnote_shape),
-                "endnoteShape": note_shape_json(&section.section_def.endnote_shape),
-            })
-        })
+        .flatten()
+        .map(|face| face.name.clone())
         .collect();
-
-    let value = serde_json::json!({
-        "file": file_path,
-        "sections": sections,
+    let para_count: usize = document.sections.iter().map(|s| s.paragraphs.len()).sum();
+    let last_saved_with = match detected_format {
+        rhwp::parser::FileFormat::Hwp => {
+            rhwp::parser::hwp_summary::last_saved_with(&document.extra_streams)
+        }
+        rhwp::parser::FileFormat::Hwpx => {
+            rhwp::parser::hwp_summary::hwpx_last_saved_with(&document.hwpx_aux_entries)
+        }
+        _ => None,
+    }
+    .map(|save_version| {
+        serde_json::json!({
+            "product": save_version.product,
+            "version": save_version.version,
+            "confidence": "metadata",
+        })
     });
-    match serde_json::to_string_pretty(&value) {
-        Ok(text) => println!("{}", text),
-        Err(e) => eprintln!("오류: JSON 생성 실패 - {}", e),
-    }
+    provenance::marked(
+        serde_json::json!({
+            "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+            "source": file_path,
+            "format": format_str,
+            "sizeBytes": file_size,
+            "version": version,
+            "sections": document.sections.len(),
+            "pageCount": doc.page_count(),
+            "paraCount": para_count,
+            "fonts": fonts,
+            // [#3407] best-effort 문서 제목 — 없으면 null. batch info 로 자동 전파.
+            "title": document_title(doc),
+            // HWP5 summary 또는 HWPX version.xml 메타데이터다. 원 작성 제품이 아니라
+            // 마지막 저장 제품을 가리키며 없거나 수정될 수 있다.
+            "lastSavedWith": last_saved_with,
+            // [#6208] 문서에 실린 인쇄 방식(모아 찍기 등). rhwp 는 이 값을 **출력에
+            // 반영하지 않으므로**, 한글 오라클 PDF 와 대조할 때 `impliesNup` 이 true
+            // 면 한글 쪽 장 수·용지 방향이 달라 좌표를 그대로 견주면 오판한다.
+            // 값이 문서에 없으면 `printMethod: null`.
+            "printMethod": doc.document().doc_info.print_method,
+            "printMethodImpliesNup": rhwp::model::document::print_method_implies_nup(
+                doc.document().doc_info.print_method,
+            ),
+            // [#3880 T1] 파싱 중 건너뛴 것을 봉투가 스스로 밝힌다.
+            //
+            // 인간 출력은 `warnings: N` 과 상세를 stderr 로 내는데 JSON 분기는 그
+            // 앞에서 `return EXIT_OK` 로 끝나 도달하지 못했다. 그래서 리소스가 조용히
+            // 잘린 문서가 **exit 0 + 완전해 보이는 봉투**를 냈다 — `fonts` 가 부분
+            // 목록인데 봉투는 그렇다고 말하지 않았다(#3719 "부분 목록 금지" 위반).
+            //
+            // 경고가 없으면 빈 배열이다. 키를 빼면 소비자가 "경고 없음"과 "이 빌드는
+            // 경고를 모름"을 구별할 수 없다.
+            "warnings": info_warnings_value(doc),
+        }),
+        "info",
+    )
 }
 
-fn note_shape_json(shape: &rhwp::model::footnote::FootnoteShape) -> serde_json::Value {
-    serde_json::json!({
-        "raw": {
-            "attr": shape.attr,
-            "numberFormat": format!("{:?}", shape.number_format),
-            "userChar": shape.user_char.to_string(),
-            "prefixChar": shape.prefix_char.to_string(),
-            "suffixChar": shape.suffix_char.to_string(),
-            "startNumber": shape.start_number,
-            "separatorLength": hu_json(shape.separator_length as i32),
-            "separatorMarginTop": hu_json(shape.separator_margin_top as i32),
-            "separatorMarginBottom": hu_json(shape.separator_margin_bottom as i32),
-            "noteSpacing": hu_json(shape.note_spacing as i32),
-            "separatorLineType": shape.separator_line_type,
-            "separatorLineWidth": shape.separator_line_width,
-            "separatorColor": format!("0x{:08x}", shape.separator_color),
-            "numbering": format!("{:?}", shape.numbering),
-            "placement": format!("{:?}", shape.placement),
-            "numberCodeSuperscript": shape.number_code_superscript,
-            "printInlineAfterText": shape.print_inline_after_text,
-            "rawUnknown": hu_json(shape.raw_unknown as i32),
-        },
-        "ui": {
-            "separatorAbove": hu_json(shape.separator_above_margin_hu() as i32),
-            "separatorBelow": hu_json(shape.separator_below_margin_hu() as i32),
-            "betweenNotes": hu_json(shape.between_notes_margin_hu() as i32),
-        },
-    })
-}
-
-fn hu_json(hu: i32) -> serde_json::Value {
-    serde_json::json!({
-        "hu": hu,
-        "mm": rounded_mm(hu),
-    })
-}
-
-fn rounded_mm(hu: i32) -> f64 {
-    (hu_to_mm_i(hu) * 1000.0).round() / 1000.0
-}
-
-fn dump_pages(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("사용법: rhwp dump-pages <파일.hwp> [-p <페이지번호>]");
-        return;
-    }
-
-    let file_path = &args[0];
-    let mut target_page: Option<u32> = None;
-    let mut respect_vpos_reset = false;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--page" | "-p" => {
-                if i + 1 < args.len() {
-                    target_page = args[i + 1].parse().ok();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            "--respect-vpos-reset" => {
-                respect_vpos_reset = true;
-                i += 1;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    if respect_vpos_reset {
-        doc.set_respect_vpos_reset(true);
-    }
-
-    println!("문서 로드: {} ({}페이지)", file_path, doc.page_count());
-    print!("{}", doc.dump_page_items(target_page));
-}
-
-fn dump_endnote_lines(args: &[String]) {
-    if args.len() < 4 {
-        eprintln!(
-            "사용법: rhwp dump-endnote-lines <파일.hwp> <section> <para> <control> [note-para]"
-        );
-        return;
-    }
-
-    let file_path = &args[0];
-    let section_idx = match args[1].parse::<usize>() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("오류: section 인덱스 파싱 실패 - {}", e);
-            return;
-        }
-    };
-    let para_idx = match args[2].parse::<usize>() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("오류: para 인덱스 파싱 실패 - {}", e);
-            return;
-        }
-    };
-    let control_idx = match args[3].parse::<usize>() {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("오류: control 인덱스 파싱 실패 - {}", e);
-            return;
-        }
-    };
-    let target_note_para = if args.len() >= 5 {
-        match args[4].parse::<usize>() {
-            Ok(v) => Some(v),
-            Err(e) => {
-                eprintln!("오류: note-para 인덱스 파싱 실패 - {}", e);
-                return;
-            }
-        }
-    } else {
-        None
-    };
-
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    let document = doc.document();
-    let Some(section) = document.sections.get(section_idx) else {
-        eprintln!("오류: section {} 범위 초과", section_idx);
-        return;
-    };
-    let Some(source_para) = section.paragraphs.get(para_idx) else {
-        eprintln!("오류: para {} 범위 초과", para_idx);
-        return;
-    };
-    let Some(ctrl) = source_para.controls.get(control_idx) else {
-        eprintln!("오류: control {} 범위 초과", control_idx);
-        return;
-    };
-
-    let rhwp::model::control::Control::Endnote(endnote) = ctrl else {
-        eprintln!(
-            "오류: s{}:p{}:ci{} 는 미주가 아닙니다 ({})",
-            section_idx,
-            para_idx,
-            control_idx,
-            control_kind(ctrl)
-        );
-        return;
-    };
-
-    println!(
-        "문서: {} source=s{}:p{}:ci{} endnote_no={} note_paras={}",
-        file_path,
-        section_idx,
-        para_idx,
-        control_idx,
-        endnote.number,
-        endnote.paragraphs.len()
-    );
-    println!("source_text={}", brief_text(&source_para.text, 120));
-    println!(
-        "source_control_positions={}",
-        format_control_positions(source_para)
-    );
-
-    for (note_para_idx, para) in endnote.paragraphs.iter().enumerate() {
-        if target_note_para.is_some_and(|target| target != note_para_idx) {
-            continue;
-        }
-        println!(
-            "\n-- note_para={} source=s{}:p{}:ci{}:note{} --",
-            note_para_idx, section_idx, para_idx, control_idx, note_para_idx
-        );
-        dump_paragraph_line_trace(para);
-    }
-}
-
-fn dump_paragraph_line_trace(para: &rhwp::model::paragraph::Paragraph) {
-    use rhwp::model::control::Control;
-
-    let composed = rhwp::renderer::composer::compose_paragraph(para);
-    let control_positions = para.control_text_positions();
-
-    println!(
-        "para text_len={} char_count={} controls={} line_segs={} char_offsets={} text={}",
-        para.text.chars().count(),
-        para.char_count,
-        para.controls.len(),
-        para.line_segs.len(),
-        format_u32_list(&para.char_offsets),
-        brief_text(&para.text, 160)
-    );
-    for (i, seg) in para.line_segs.iter().enumerate() {
-        println!(
-            "  line_seg[{i}] ts={} char={} vpos={} lh={} th={} bl={} gap={} cs={} sw={} tag=0x{:08x}",
-            seg.text_start,
-            para.utf16_pos_to_char_idx(seg.text_start),
-            seg.vertical_pos,
-            seg.line_height,
-            seg.text_height,
-            seg.baseline_distance,
-            seg.line_spacing,
-            seg.column_start,
-            seg.segment_width,
-            seg.tag
-        );
-    }
-
-    if para.controls.is_empty() {
-        println!("  controls=[]");
-    } else {
-        for (ci, ctrl) in para.controls.iter().enumerate() {
-            let pos = control_positions.get(ci).copied().unwrap_or(usize::MAX);
-            match ctrl {
-                Control::Equation(eq) => println!(
-                    "  control[{ci}] kind=Equation pos={} tac=true size={}x{} font={} baseline={} script={}",
-                    pos,
-                    eq.common.width,
-                    eq.common.height,
-                    eq.font_size,
-                    eq.baseline,
-                    brief_text(&eq.script, 100)
-                ),
-                Control::Picture(pic) => println!(
-                    "  control[{ci}] kind=Picture pos={} tac={} size={}x{}",
-                    pos, pic.common.treat_as_char, pic.common.width, pic.common.height
-                ),
-                Control::Shape(shape) => {
-                    let common = shape.common();
-                    println!(
-                        "  control[{ci}] kind=Shape pos={} tac={} size={}x{}",
-                        pos, common.treat_as_char, common.width, common.height
-                    );
-                }
-                Control::Table(table) => println!(
-                    "  control[{ci}] kind=Table pos={} tac={} rows={} cols={}",
-                    pos,
-                    table.common.treat_as_char,
-                    table.row_count,
-                    table.col_count
-                ),
-                other => println!(
-                    "  control[{ci}] kind={} pos={} tac=false",
-                    control_kind(other),
-                    pos
-                ),
-            }
-        }
-    }
-
-    println!("  composed_lines={}", composed.lines.len());
-    for (li, line) in composed.lines.iter().enumerate() {
-        let next_start = composed
-            .lines
-            .get(li + 1)
-            .map(|next| next.char_start)
-            .unwrap_or_else(|| {
-                line.char_start
-                    + line
-                        .runs
-                        .iter()
-                        .map(|run| run.text.chars().count())
-                        .sum::<usize>()
-                    + usize::from(line.has_line_break)
-            });
-        println!(
-            "    line[{li}] char={}..{} runs={} break={} lh={} bl={} gap={} cs={} sw={} layout_tacs={}",
-            line.char_start,
-            next_start,
-            format_runs(&line.runs),
-            line.has_line_break,
-            line.line_height,
-            line.baseline_distance,
-            line.line_spacing,
-            line.column_start,
-            line.segment_width,
-            format_layout_tac_hits(&composed, li)
-        );
-    }
-
-    if composed.tac_controls.is_empty() {
-        println!("  tac_controls=[]");
-    } else {
-        println!("  tac_controls:");
-        for (pos, width_hu, ci) in &composed.tac_controls {
-            let line_hits = composed
-                .lines
-                .iter()
-                .enumerate()
-                .filter_map(|(li, line)| {
-                    let start = line.char_start;
-                    let end = composed
-                        .lines
-                        .get(li + 1)
-                        .map(|next| next.char_start)
-                        .unwrap_or_else(|| {
-                            line.char_start
-                                + line
-                                    .runs
-                                    .iter()
-                                    .map(|run| run.text.chars().count())
-                                    .sum::<usize>()
-                                + usize::from(line.has_line_break)
-                        });
-                    if if end > start {
-                        *pos >= start && *pos < end
-                    } else {
-                        *pos == start
-                    } {
-                        Some(li.to_string())
-                    } else {
-                        None
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            println!(
-                "    tac ci={} pos={} width={} strict_line_candidates=[{}]",
-                ci, pos, width_hu, line_hits
-            );
-        }
-    }
-}
-
-fn format_layout_tac_hits(
-    composed: &rhwp::renderer::composer::ComposedParagraph,
-    line_idx: usize,
-) -> String {
-    let Some(line) = composed.lines.get(line_idx) else {
-        return "[]".to_string();
-    };
-    if composed.tac_controls.is_empty() {
-        return "[]".to_string();
-    }
-
-    let mut hits = Vec::new();
-    if line.runs.is_empty() {
-        let start = line.char_start;
-        let end = composed
-            .lines
-            .get(line_idx + 1)
-            .map(|next| next.char_start)
-            .unwrap_or(usize::MAX);
-        for (pos, _, ci) in &composed.tac_controls {
-            if *pos >= start && *pos < end {
-                hits.push(format!("ci{}@{}:empty", ci, pos));
-            }
-        }
-    } else {
-        let mut run_start = line.char_start;
-        for (run_idx, run) in line.runs.iter().enumerate() {
-            let run_len = run.text.chars().count();
-            let run_end = run_start + run_len;
-            let next_line_starts_at_run_end = composed
-                .lines
-                .get(line_idx + 1)
-                .is_some_and(|next| next.char_start == run_end);
-            let allow_end = run_idx == line.runs.len() - 1 && !next_line_starts_at_run_end;
-            for (pos, _, ci) in &composed.tac_controls {
-                if *pos >= run_start && (*pos < run_end || (allow_end && *pos == run_end)) {
-                    hits.push(format!(
-                        "ci{}@{}:run{}+{}",
-                        ci,
-                        pos,
-                        run_idx,
-                        pos.saturating_sub(run_start)
-                    ));
-                }
-            }
-            run_start = run_end;
-        }
-    }
-
-    if hits.is_empty() {
-        "[]".to_string()
-    } else {
-        format!("[{}]", hits.join(","))
-    }
-}
-
-fn control_kind(ctrl: &rhwp::model::control::Control) -> &'static str {
-    use rhwp::model::control::Control;
-    match ctrl {
-        Control::SectionDef(_) => "SectionDef",
-        Control::ColumnDef(_) => "ColumnDef",
-        Control::Table(_) => "Table",
-        Control::Shape(_) => "Shape",
-        Control::Picture(_) => "Picture",
-        Control::Header(_) => "Header",
-        Control::Footer(_) => "Footer",
-        Control::Footnote(_) => "Footnote",
-        Control::Endnote(_) => "Endnote",
-        Control::AutoNumber(_) => "AutoNumber",
-        Control::NewNumber(_) => "NewNumber",
-        Control::PageNumberPos(_) => "PageNumberPos",
-        Control::Bookmark(_) => "Bookmark",
-        Control::Hyperlink(_) => "Hyperlink",
-        Control::Ruby(_) => "Ruby",
-        Control::CharOverlap(_) => "CharOverlap",
-        Control::PageHide(_) => "PageHide",
-        Control::HiddenComment(_) => "HiddenComment",
-        Control::Equation(_) => "Equation",
-        Control::Field(_) => "Field",
-        Control::Form(_) => "Form",
-        Control::Unknown(_) => "Unknown",
-    }
-}
-
-fn format_control_positions(para: &rhwp::model::paragraph::Paragraph) -> String {
-    let positions = para.control_text_positions();
-    if positions.is_empty() {
-        return "[]".to_string();
-    }
-    positions
-        .iter()
-        .enumerate()
-        .map(|(ci, pos)| {
-            let kind = para.controls.get(ci).map(control_kind).unwrap_or("?");
-            format!("{ci}:{kind}@{pos}")
-        })
-        .collect::<Vec<_>>()
-        .join(",")
-}
-
-fn format_runs(runs: &[rhwp::renderer::composer::ComposedTextRun]) -> String {
-    if runs.is_empty() {
-        return "[]".to_string();
-    }
-    let parts = runs
-        .iter()
-        .map(|run| {
-            format!(
-                "cs{}:l{}:'{}'",
-                run.char_style_id,
-                run.lang_index,
-                brief_text(&run.text, 40)
-            )
-        })
-        .collect::<Vec<_>>();
-    format!("[{}]", parts.join("|"))
-}
-
-fn format_u32_list(values: &[u32]) -> String {
-    if values.is_empty() {
-        return "[]".to_string();
-    }
-    if values.len() <= 16 {
-        return format!("{:?}", values);
-    }
-    let head = values
-        .iter()
-        .take(8)
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    let tail = values
-        .iter()
-        .rev()
-        .take(4)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .map(|v| v.to_string())
-        .collect::<Vec<_>>()
-        .join(",");
-    format!("[{}...{};len={}]", head, tail, values.len())
-}
-
-fn brief_text(text: &str, max_chars: usize) -> String {
-    let mut out = String::new();
-    for (count, ch) in text.chars().enumerate() {
-        if count >= max_chars {
-            out.push('…');
-            break;
-        }
-        match ch {
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{FFFC}' => out.push('□'),
-            c if c.is_control() => out.push_str(&format!("\\u{{{:04X}}}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn dump_controls(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp dump <파일.hwp> [--section <번호>] [--para <번호>]");
-        return;
-    }
-
-    let file_path = &args[0];
-    let mut filter_section: Option<usize> = None;
-    let mut filter_para: Option<usize> = None;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--section" | "-s" => {
-                if i + 1 < args.len() {
-                    filter_section = args[i + 1].parse().ok();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            "--para" | "-p" => {
-                if i + 1 < args.len() {
-                    filter_para = args[i + 1].parse().ok();
-                    i += 2;
-                } else {
-                    i += 1;
-                }
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    let document = doc.document();
-
-    // border_fill 상세 덤프 (필터 없을 때 전체, 필터 있을 때 관련 bf만)
-    if filter_section.is_none() && filter_para.is_none() {
-        for (i, bf) in document.doc_info.border_fills.iter().enumerate() {
-            let fill = &bf.fill;
-            let solid_info = fill
-                .solid
-                .as_ref()
-                .map(|s| {
-                    format!(
-                        "bg=#{:06X} pat_type={} pat_color=#{:06X}",
-                        s.background_color, s.pattern_type, s.pattern_color
-                    )
-                })
-                .unwrap_or_default();
-            let grad_info = if fill.gradient.is_some() {
-                " gradient"
-            } else {
-                ""
-            };
-            let img_info = fill
-                .image
-                .as_ref()
-                .map(|img| {
-                    format!(
-                        " image(bin_id={}, mode={:?}, brightness={}, contrast={}, effect={})",
-                        img.bin_data_id, img.fill_mode, img.brightness, img.contrast, img.effect
-                    )
-                })
-                .unwrap_or_default();
-            println!(
-                "  border_fill[{}] fill_type={:?} {}{}{}",
-                i, fill.fill_type, solid_info, grad_info, img_info
-            );
-        }
-    }
-
-    use rhwp::model::control::Control;
-    use rhwp::model::paragraph::ColumnBreakType;
-    use rhwp::model::shape::{HorzRelTo, ShapeObject, TextWrap, VertRelTo};
-
-    let vert_str = |v: &VertRelTo| -> &str {
-        match v {
-            VertRelTo::Paper => "용지",
-            VertRelTo::Page => "쪽",
-            VertRelTo::Para => "문단",
-        }
-    };
-    let horz_str = |h: &HorzRelTo| -> &str {
-        match h {
-            HorzRelTo::Paper => "용지",
-            HorzRelTo::Page => "쪽",
-            HorzRelTo::Column => "단",
-            HorzRelTo::Para => "문단",
-        }
-    };
-    let wrap_str = |w: &TextWrap| -> &str {
-        match w {
-            TextWrap::Square => "어울림",
-            TextWrap::Tight => "빈 공간 채움",
-            TextWrap::Through => "통과",
-            TextWrap::TopAndBottom => "자리차지",
-            TextWrap::BehindText => "글뒤로",
-            TextWrap::InFrontOfText => "글앞으로",
-        }
-    };
-    let break_str = |b: &ColumnBreakType| -> &str {
-        match b {
-            ColumnBreakType::None => "",
-            ColumnBreakType::Section => "[구역나누기]",
-            ColumnBreakType::MultiColumn => "[다단나누기]",
-            ColumnBreakType::Page => "[쪽나누기]",
-            ColumnBreakType::Column => "[단나누기]",
-        }
-    };
-
-    // 도형 공통 속성 출력 헬퍼
-    let dump_common = |c: &rhwp::model::shape::CommonObjAttr, indent: &str| {
-        println!(
-            "{}  크기: {:.1}mm × {:.1}mm ({}×{} HU)",
-            indent,
-            hu_to_mm(c.width),
-            hu_to_mm(c.height),
-            c.width,
-            c.height
-        );
-        println!(
-            "{}  위치: 가로={} 오프셋={:.1}mm({}) 정렬={:?}, 세로={} 오프셋={:.1}mm({}) 정렬={:?}",
-            indent,
-            horz_str(&c.horz_rel_to),
-            hu_to_mm(c.horizontal_offset),
-            c.horizontal_offset,
-            c.horz_align,
-            vert_str(&c.vert_rel_to),
-            hu_to_mm(c.vertical_offset),
-            c.vertical_offset,
-            c.vert_align
-        );
-        println!(
-            "{}  배치: {}, 글자처럼={}, z={}",
-            indent,
-            wrap_str(&c.text_wrap),
-            c.treat_as_char,
-            c.z_order
-        );
-        println!(
-            "{}  바깥 여백: left={:.2}mm({}) right={:.2}mm({}) top={:.2}mm({}) bottom={:.2}mm({})",
-            indent,
-            hu_to_mm_i(c.margin.left as i32),
-            c.margin.left,
-            hu_to_mm_i(c.margin.right as i32),
-            c.margin.right,
-            hu_to_mm_i(c.margin.top as i32),
-            c.margin.top,
-            hu_to_mm_i(c.margin.bottom as i32),
-            c.margin.bottom
-        );
-    };
-
-    // 도형 요소 속성 출력 헬퍼
-    let dump_shape_attr = |sa: &rhwp::model::shape::ShapeComponentAttr, indent: &str| {
-        let eff_w = (sa.current_width as f64 * sa.render_sx) as u32;
-        let eff_h = (sa.current_height as f64 * sa.render_sy) as u32;
-        println!("{}  요소: orig={}×{}, curr={}×{}, M=[{:.3},{:.3},{:.0}; {:.3},{:.3},{:.0}], offset=({},{}), eff={:.1}mm×{:.1}mm",
-            indent, sa.original_width, sa.original_height,
-            sa.current_width, sa.current_height,
-            sa.render_sx, sa.render_b, sa.render_tx,
-            sa.render_c, sa.render_sy, sa.render_ty,
-            sa.offset_x, sa.offset_y,
-            hu_to_mm(eff_w), hu_to_mm(eff_h));
-        if sa.horz_flip || sa.vert_flip || sa.rotation_angle != 0 {
-            println!(
-                "{}  변환: 뒤집기=({},{}), 회전={}",
-                indent, sa.horz_flip, sa.vert_flip, sa.rotation_angle
-            );
-        }
-    };
-
-    // 재귀적 도형 덤프
-    fn dump_shape(
-        shape: &ShapeObject,
-        indent: &str,
-        dump_common_fn: &dyn Fn(&rhwp::model::shape::CommonObjAttr, &str),
-        dump_sa_fn: &dyn Fn(&rhwp::model::shape::ShapeComponentAttr, &str),
-    ) {
-        match shape {
-            ShapeObject::Line(s) => {
-                println!(
-                    "{}[직선] start=({},{}) end=({},{})",
-                    indent, s.start.x, s.start.y, s.end.x, s.end.y
-                );
-                println!(
-                    "{}  선: color={:#010x}, width={}, style={:#06x}",
-                    indent,
-                    s.drawing.border_line.color,
-                    s.drawing.border_line.width,
-                    s.drawing.border_line.attr
-                );
-                dump_common_fn(&s.common, indent);
-                dump_sa_fn(&s.drawing.shape_attr, indent);
-            }
-            ShapeObject::Rectangle(s) => {
-                println!("{}[사각형] round={}%", indent, s.round_rate);
-                println!(
-                    "{}  선: color={:#010x}, width={}, style={:#06x}",
-                    indent,
-                    s.drawing.border_line.color,
-                    s.drawing.border_line.width,
-                    s.drawing.border_line.attr
-                );
-                println!(
-                    "{}  채우기: {:?}{}",
-                    indent,
-                    s.drawing.fill.fill_type,
-                    if let Some(ref img) = s.drawing.fill.image {
-                        format!(
-                            ", image=bin_data_id={}, mode={:?}",
-                            img.bin_data_id, img.fill_mode
-                        )
-                    } else {
-                        String::new()
-                    }
-                );
-                dump_common_fn(&s.common, indent);
-                dump_sa_fn(&s.drawing.shape_attr, indent);
-                if let Some(tb) = &s.drawing.text_box {
-                    println!("{}  글상자: list_attr={:#010x}, margins=({},{},{},{}), max_width={}, paras={}",
-                        indent, tb.list_attr, tb.margin_left, tb.margin_right, tb.margin_top, tb.margin_bottom,
-                        tb.max_width, tb.paragraphs.len());
-                    for (tpi, tp) in tb.paragraphs.iter().enumerate() {
-                        let text_preview = if tp.text.is_empty() {
-                            "(빈)".to_string()
-                        } else if tp.text.chars().count() > 60 {
-                            let end = tp
-                                .text
-                                .char_indices()
-                                .nth(60)
-                                .map(|(i, _)| i)
-                                .unwrap_or(tp.text.len());
-                            format!("\"{}...\"", &tp.text[..end])
-                        } else {
-                            format!("\"{}\"", tp.text)
-                        };
-                        println!(
-                            "{}    p[{}]: ps_id={}, cc={}, text={}, ls_count={}, ctrls={}",
-                            indent,
-                            tpi,
-                            tp.para_shape_id,
-                            tp.char_count,
-                            text_preview,
-                            tp.line_segs.len(),
-                            tp.controls.len()
-                        );
-                        for (li, ls) in tp.line_segs.iter().enumerate() {
-                            println!(
-                                "{}      ls[{}]: vpos={}, lh={}, th={}, bl={}, cs={}, sw={}",
-                                indent,
-                                li,
-                                ls.vertical_pos,
-                                ls.line_height,
-                                ls.text_height,
-                                ls.baseline_distance,
-                                ls.column_start,
-                                ls.segment_width
-                            );
-                        }
-                    }
-                }
-            }
-            ShapeObject::Ellipse(s) => {
-                println!("{}[타원]", indent);
-                dump_common_fn(&s.common, indent);
-                dump_sa_fn(&s.drawing.shape_attr, indent);
-            }
-            ShapeObject::Arc(s) => {
-                println!("{}[호]", indent);
-                dump_common_fn(&s.common, indent);
-                dump_sa_fn(&s.drawing.shape_attr, indent);
-            }
-            ShapeObject::Polygon(s) => {
-                println!("{}[다각형] points={}", indent, s.points.len());
-                dump_common_fn(&s.common, indent);
-                dump_sa_fn(&s.drawing.shape_attr, indent);
-                // 좌표 범위 출력
-                if !s.points.is_empty() {
-                    let min_x = s.points.iter().map(|p| p.x).min().unwrap();
-                    let max_x = s.points.iter().map(|p| p.x).max().unwrap();
-                    let min_y = s.points.iter().map(|p| p.y).min().unwrap();
-                    let max_y = s.points.iter().map(|p| p.y).max().unwrap();
-                    println!(
-                        "{}  좌표범위: x=[{},{}], y=[{},{}]",
-                        indent, min_x, max_x, min_y, max_y
-                    );
-                }
-            }
-            ShapeObject::Curve(s) => {
-                println!("{}[곡선] points={}", indent, s.points.len());
-                dump_common_fn(&s.common, indent);
-                dump_sa_fn(&s.drawing.shape_attr, indent);
-            }
-            ShapeObject::Group(g) => {
-                println!("{}[묶음] children={}", indent, g.children.len());
-                dump_common_fn(&g.common, indent);
-                dump_sa_fn(&g.shape_attr, indent);
-                let child_indent = format!("{}  ", indent);
-                for (ci, child) in g.children.iter().enumerate() {
-                    print!("{}child[{}] ", child_indent, ci);
-                    dump_shape(child, &child_indent, dump_common_fn, dump_sa_fn);
-                }
-            }
-            ShapeObject::Picture(p) => {
-                println!("{}[그림] bin_data_id={}", indent, p.image_attr.bin_data_id);
-                dump_common_fn(&p.common, indent);
-                dump_sa_fn(&p.shape_attr, indent);
-            }
-            ShapeObject::Chart(c) => {
-                println!(
-                    "{}[차트] type={:?} series={} raw_chart_data={}B",
-                    indent,
-                    c.chart_type,
-                    c.series.len(),
-                    c.raw_chart_data.len()
-                );
-                dump_common_fn(&c.common, indent);
-                dump_sa_fn(&c.drawing.shape_attr, indent);
-            }
-            ShapeObject::Ole(o) => {
-                println!(
-                    "{}[OLE] bin_data_id={} extent={}x{} flags=0x{:02X} raw={}B",
-                    indent,
-                    o.bin_data_id,
-                    o.extent_x,
-                    o.extent_y,
-                    o.flags,
-                    o.raw_tag_data.len()
-                );
-                dump_common_fn(&o.common, indent);
-                dump_sa_fn(&o.drawing.shape_attr, indent);
-            }
-        }
-    }
-
-    for (sec_idx, section) in document.sections.iter().enumerate() {
-        if let Some(fs) = filter_section {
-            if sec_idx != fs {
-                continue;
-            }
-        }
-
-        let pd = &section.section_def.page_def;
-        println!("=== 구역 {} ===", sec_idx);
-        println!(
-            "  용지: {:.1}mm × {:.1}mm ({}×{} HU), {}",
-            hu_to_mm(pd.width),
-            hu_to_mm(pd.height),
-            pd.width,
-            pd.height,
-            if pd.landscape { "가로" } else { "세로" }
-        );
-        println!(
-            "  여백: 좌={:.1} 우={:.1} 상={:.1} 하={:.1} 머리말={:.1} 꼬리말={:.1} mm",
-            hu_to_mm(pd.margin_left),
-            hu_to_mm(pd.margin_right),
-            hu_to_mm(pd.margin_top),
-            hu_to_mm(pd.margin_bottom),
-            hu_to_mm(pd.margin_header),
-            hu_to_mm(pd.margin_footer)
-        );
-
-        // 바탕쪽 정보
-        if !section.section_def.master_pages.is_empty() {
-            println!("  바탕쪽: {}개", section.section_def.master_pages.len());
-            for (mi, mp) in section.section_def.master_pages.iter().enumerate() {
-                println!("    [{}] {:?}, 문단 {}개, 영역 {}×{} HU, is_ext={}, overlap={}, ext_flags=0x{:04X}, text_ref={}, num_ref={}",
-                    mi, mp.apply_to, mp.paragraphs.len(), mp.text_width, mp.text_height,
-                    mp.is_extension, mp.overlap, mp.ext_flags, mp.text_ref, mp.num_ref);
-                for (pi, para) in mp.paragraphs.iter().enumerate() {
-                    println!(
-                        "      p[{}]: cc={}, text=\"{}\"",
-                        pi,
-                        para.controls.len(),
-                        if para.text.is_empty() {
-                            "(빈 문단)".to_string()
-                        } else {
-                            para.text.chars().take(30).collect::<String>()
-                        }
-                    );
-                    for (ci, ctrl) in para.controls.iter().enumerate() {
-                        let ctrl_name = match ctrl {
-                            Control::Table(t) => {
-                                let cell_texts: Vec<String> = t
-                                    .cells
-                                    .iter()
-                                    .take(3)
-                                    .map(|c| {
-                                        c.paragraphs
-                                            .iter()
-                                            .map(|p| p.text.chars().take(20).collect::<String>())
-                                            .collect::<Vec<_>>()
-                                            .join("|")
-                                    })
-                                    .collect();
-                                format!("표({}x{}, tac={}, wrap={:?}, vert={:?}/{}, horz={:?}/{}, size={}x{}, cells=[{}])",
-                                    t.row_count, t.col_count, t.common.treat_as_char,
-                                    t.common.text_wrap, t.common.vert_rel_to, t.common.vertical_offset,
-                                    t.common.horz_rel_to, t.common.horizontal_offset,
-                                    t.common.width, t.common.height,
-                                    cell_texts.join("; "))
-                            }
-                            Control::Shape(s) => {
-                                let mut desc = format!("도형(ctrl_id=0x{:08X}, w={}, h={}, attr=0x{:08X}, wc={:?}, hc={:?})",
-                                    s.common().ctrl_id, s.common().width, s.common().height,
-                                    s.common().attr, s.common().width_criterion, s.common().height_criterion);
-                                // TextBox 내용 출력
-                                if let Some(tb) = s.drawing().and_then(|d| d.text_box.as_ref()) {
-                                    desc += &format!(" 글상자({}문단)", tb.paragraphs.len());
-                                    for (tpi, tp) in tb.paragraphs.iter().enumerate() {
-                                        let tp_text: String = tp.text.chars().take(20).collect();
-                                        desc += &format!(
-                                            "\n          tb_p[{}]: cc={} text=\"{}\"",
-                                            tpi,
-                                            tp.controls.len(),
-                                            tp_text
-                                        );
-                                        for (tci, tc) in tp.controls.iter().enumerate() {
-                                            let tc_name = match tc {
-                                                Control::AutoNumber(an) => {
-                                                    format!("자동번호({:?})", an.number_type)
-                                                }
-                                                _ => format!("{:?}", std::mem::discriminant(tc)),
-                                            };
-                                            desc += &format!(
-                                                "\n            tb_ctrl[{}]: {}",
-                                                tci, tc_name
-                                            );
-                                        }
-                                    }
-                                }
-                                desc
-                            }
-                            Control::Picture(p) => {
-                                let wm = p
-                                    .image_attr
-                                    .watermark_preset()
-                                    .map(|s| format!(", watermark={}", s))
-                                    .unwrap_or_default();
-                                format!(
-                                    "그림(bin_id={}, w={}, h={}, tac={}{})",
-                                    p.image_attr.bin_data_id,
-                                    p.common.width,
-                                    p.common.height,
-                                    p.common.treat_as_char,
-                                    wm
-                                )
-                            }
-                            Control::Header(_) => "머리말".to_string(),
-                            Control::Footer(_) => "꼬리말".to_string(),
-                            _ => format!("{:?}", std::mem::discriminant(ctrl)),
-                        };
-                        println!("        ctrl[{}]: {}", ci, ctrl_name);
-                    }
-                }
-            }
-        }
-        if section.section_def.hide_master_page {
-            println!("  바탕쪽 감추기: true");
-        }
-
-        for (para_idx, para) in section.paragraphs.iter().enumerate() {
-            if let Some(fp) = filter_para {
-                if para_idx != fp {
-                    continue;
-                }
-            }
-
-            let text_preview = if para.text.is_empty() {
-                "(빈 문단)".to_string()
-            } else {
-                let preview = if para.text.chars().count() > 50 {
-                    let end = para
-                        .text
-                        .char_indices()
-                        .nth(50)
-                        .map(|(i, _)| i)
-                        .unwrap_or(para.text.len());
-                    format!("\"{}...\"", &para.text[..end])
-                } else {
-                    format!("\"{}\"", para.text)
-                };
-                preview
-            };
-
-            let break_info = break_str(&para.column_type);
-            println!(
-                "\n--- 문단 {}.{} --- cc={}, text_len={}, controls={} {}",
-                sec_idx,
-                para_idx,
-                para.char_count,
-                para.text.chars().count(),
-                para.controls.len(),
-                break_info
-            );
-            println!("  텍스트: {}", text_preview);
-            // char_shapes 출력
-            if !para.char_shapes.is_empty() {
-                let text_chars: Vec<char> = para.text.chars().collect();
-                for (ci, cs) in para.char_shapes.iter().enumerate() {
-                    let next_pos = para
-                        .char_shapes
-                        .get(ci + 1)
-                        .map(|n| n.start_pos)
-                        .unwrap_or(u32::MAX);
-                    let char_at = text_chars
-                        .iter()
-                        .enumerate()
-                        .find(|(i, _)| {
-                            if *i < para.char_offsets.len() {
-                                para.char_offsets[*i] >= cs.start_pos
-                                    && para.char_offsets[*i] < next_pos
-                            } else {
-                                false
-                            }
-                        })
-                        .map(|(_, c)| *c);
-                    if let Some(chs) = document.doc_info.char_shapes.get(cs.char_shape_id as usize)
-                    {
-                        let bold = (chs.attr & 0x02) != 0;
-                        let spacing = chs.spacings[0]; // 한국어 자간
-                        let ratio = chs.ratios[0]; // 한국어 장평
-                        println!(
-                            "  [CS] pos={} id={} bold={} spacing={}% ratio={}% base={} attr=0x{:08X} text=#{:06X} shade=#{:06X} shadow=#{:06X} border_fill_id={} shadow_type={} shadow_off=({}, {}) char={:?}",
-                            cs.start_pos,
-                            cs.char_shape_id,
-                            bold,
-                            spacing,
-                            ratio,
-                            chs.base_size,
-                            chs.attr,
-                            chs.text_color,
-                            chs.shade_color,
-                            chs.shadow_color,
-                            chs.border_fill_id,
-                            chs.shadow_type,
-                            chs.shadow_offset_x,
-                            chs.shadow_offset_y,
-                            char_at.map(|c| c.to_string()).unwrap_or_default()
-                        );
-                    }
-                }
-            }
-            if let Some(ps) = document
-                .doc_info
-                .para_shapes
-                .get(para.para_shape_id as usize)
-            {
-                // 문단 모양 기본 정보 (항상 출력)
-                println!(
-                    "  [PS] ps_id={} align={:?} spacing: before={} after={} line={}/{:?}",
-                    para.para_shape_id,
-                    ps.alignment,
-                    ps.spacing_before,
-                    ps.spacing_after,
-                    ps.line_spacing,
-                    ps.line_spacing_type
-                );
-                println!(
-                    "       margins: left={} right={} indent={} border_fill_id={}",
-                    ps.margin_left, ps.margin_right, ps.indent, ps.border_fill_id
-                );
-                if ps.border_fill_id > 0 {
-                    println!(
-                        "       border_spacing: left={} right={} top={} bottom={}",
-                        ps.border_spacing[0],
-                        ps.border_spacing[1],
-                        ps.border_spacing[2],
-                        ps.border_spacing[3]
-                    );
-                }
-                if ps.head_type != rhwp::model::style::HeadType::None {
-                    println!("       head={:?} level={} num_id={} attr1=0x{:08X} attr2=0x{:08X} raw_extra={:?}",
-                        ps.head_type, ps.para_level, ps.numbering_id, ps.attr1, ps.attr2,
-                        &para.raw_header_extra);
-                }
-                {
-                    let td_id = ps.tab_def_id;
-                    if let Some(td) = document.doc_info.tab_defs.get(td_id as usize) {
-                        let tabs_str: Vec<String> = td
-                            .tabs
-                            .iter()
-                            .enumerate()
-                            .map(|(i, t)| {
-                                format!(
-                                    "tab[{}] pos={} ({:.1}mm) type={} fill={}",
-                                    i,
-                                    t.position,
-                                    hu_to_mm(t.position),
-                                    t.tab_type,
-                                    t.fill_type
-                                )
-                            })
-                            .collect();
-                        println!(
-                            "       tab_def_id={} auto_left={} auto_right={} tabs=[{}]",
-                            td_id,
-                            td.auto_tab_left,
-                            td.auto_tab_right,
-                            if tabs_str.is_empty() {
-                                "(없음)".to_string()
-                            } else {
-                                tabs_str.join(", ")
-                            }
-                        );
-                    } else {
-                        println!("       tab_def_id={} (정의 없음)", td_id);
-                    }
-                }
-            }
-            // line_segs 출력
-            if !para.line_segs.is_empty() {
-                for (li, ls) in para.line_segs.iter().enumerate() {
-                    println!("  ls[{}]: ts={}, vpos={}, lh={}, th={}, bl={}, ls={}, cs={}, sw={}, tag=0x{:08X}",
-                        li, ls.text_start, ls.vertical_pos, ls.line_height, ls.text_height,
-                        ls.baseline_distance, ls.line_spacing, ls.column_start, ls.segment_width, ls.tag);
-                }
-            }
-
-            for (ctrl_idx, ctrl) in para.controls.iter().enumerate() {
-                let prefix = format!("  [{}] ", ctrl_idx);
-                match ctrl {
-                    Control::ColumnDef(cd) => {
-                        let ct = match cd.column_type {
-                            rhwp::model::page::ColumnType::Normal => "일반",
-                            rhwp::model::page::ColumnType::Distribute => "배분",
-                            rhwp::model::page::ColumnType::Parallel => "병행",
-                        };
-                        println!(
-                            "{}단정의: {}단, 유형={}, 간격={:.1}mm({}), 같은너비={}",
-                            prefix,
-                            cd.column_count,
-                            ct,
-                            hu_to_mm_i(cd.spacing as i32),
-                            cd.spacing,
-                            cd.same_width
-                        );
-                        if !cd.widths.is_empty() {
-                            // 비례값일 경우 body_width 기준으로 실제 mm 변환
-                            let body_width_hu = {
-                                let spd = &section.section_def.page_def;
-                                let (pw, _) = if spd.landscape {
-                                    (spd.height, spd.width)
-                                } else {
-                                    (spd.width, spd.height)
-                                };
-                                (pw - spd.margin_left - spd.margin_right - spd.margin_gutter) as f64
-                            };
-                            let total: f64 = if cd.proportional_widths {
-                                cd.widths
-                                    .iter()
-                                    .chain(cd.gaps.iter())
-                                    .map(|&v| (v as u16) as f64)
-                                    .sum()
-                            } else {
-                                1.0
-                            };
-                            let cols_info: Vec<String> = cd
-                                .widths
-                                .iter()
-                                .enumerate()
-                                .map(|(i, w)| {
-                                    let gap = cd.gaps.get(i).copied().unwrap_or(0);
-                                    if cd.proportional_widths && total > 0.0 {
-                                        let w_hu = (*w as u16) as f64 / total * body_width_hu;
-                                        let g_hu = (gap as u16) as f64 / total * body_width_hu;
-                                        format!(
-                                            "너비={:.1}mm 간격={:.1}mm",
-                                            w_hu * 25.4 / 7200.0,
-                                            g_hu * 25.4 / 7200.0
-                                        )
-                                    } else {
-                                        format!(
-                                            "너비={:.1}mm 간격={:.1}mm",
-                                            hu_to_mm_i(*w as i32),
-                                            hu_to_mm_i(gap as i32)
-                                        )
-                                    }
-                                })
-                                .collect();
-                            println!("{}  단별: [{}]", prefix, cols_info.join(", "));
-                        }
-                        if cd.separator_type > 0 {
-                            println!(
-                                "{}  구분선: type={}, width={}, color={:#010x}",
-                                prefix, cd.separator_type, cd.separator_width, cd.separator_color
-                            );
-                        }
-                    }
-                    Control::SectionDef(sd) => {
-                        let spd = &sd.page_def;
-                        println!(
-                            "{}구역정의: 용지 {:.1}×{:.1}mm, {}, flags=0x{:08X}",
-                            prefix,
-                            hu_to_mm(spd.width),
-                            hu_to_mm(spd.height),
-                            if spd.landscape { "가로" } else { "세로" },
-                            sd.flags
-                        );
-                        if sd.hide_header || sd.hide_footer || sd.hide_master_page {
-                            println!(
-                                "{}  감추기: 머리말={} 꼬리말={} 바탕쪽={}",
-                                prefix, sd.hide_header, sd.hide_footer, sd.hide_master_page
-                            );
-                        }
-                    }
-                    Control::Table(table) => {
-                        println!("{}표: {}행×{}열, 셀={}, 쪽나눔={:?} (attr=0x{:08x}), padding=({},{},{},{}), cs={}",
-                            prefix, table.row_count, table.col_count,
-                            table.cells.len(), table.page_break, table.raw_table_record_attr,
-                            table.padding.left, table.padding.right, table.padding.top, table.padding.bottom,
-                            table.cell_spacing);
-                        if !table.zones.is_empty() {
-                            for (zi, z) in table.zones.iter().enumerate() {
-                                println!(
-                                    "{}  zone[{}] row={}..{} col={}..{} bf={}",
-                                    prefix,
-                                    zi,
-                                    z.start_row,
-                                    z.end_row,
-                                    z.start_col,
-                                    z.end_col,
-                                    z.border_fill_id
-                                );
-                            }
-                        }
-                        {
-                            let c = &table.common;
-                            println!("{}  [common] treat_as_char={}, wrap={}, vert={}({}={:.1}mm), horz={}({}={:.1}mm)",
-                                prefix, c.treat_as_char, wrap_str(&c.text_wrap),
-                                vert_str(&c.vert_rel_to), c.vertical_offset, hu_to_mm(c.vertical_offset),
-                                horz_str(&c.horz_rel_to), c.horizontal_offset, hu_to_mm(c.horizontal_offset));
-                            println!(
-                                "{}  [common] size={}×{}({:.1}×{:.1}mm), valign={:?}, halign={:?}",
-                                prefix,
-                                c.width,
-                                c.height,
-                                hu_to_mm(c.width),
-                                hu_to_mm(c.height),
-                                c.vert_align,
-                                c.horz_align
-                            );
-                            println!("{}  [outer_margin] left={:.1}mm({}) right={:.1}mm({}) top={:.1}mm({}) bottom={:.1}mm({})",
-                                prefix,
-                                hu_to_mm_i(table.outer_margin_left as i32), table.outer_margin_left,
-                                hu_to_mm_i(table.outer_margin_right as i32), table.outer_margin_right,
-                                hu_to_mm_i(table.outer_margin_top as i32), table.outer_margin_top,
-                                hu_to_mm_i(table.outer_margin_bottom as i32), table.outer_margin_bottom);
-                            if table.raw_ctrl_data.len() >= 20 {
-                                println!(
-                                    "{}  [raw] {:02X?}",
-                                    prefix,
-                                    &table.raw_ctrl_data[..20.min(table.raw_ctrl_data.len())]
-                                );
-                            }
-                        }
-                        // 셀 상세 출력
-                        fn dump_table_deep(
-                            table: &rhwp::model::table::Table,
-                            indent: &str,
-                            depth: usize,
-                        ) {
-                            for (ci, cell) in table.cells.iter().enumerate() {
-                                let text_preview: String = cell
-                                    .paragraphs
-                                    .iter()
-                                    .map(|p| p.text.chars().take(30).collect::<String>())
-                                    .collect::<Vec<_>>()
-                                    .join("|");
-                                println!("{}셀[{}] r={},c={} rs={},cs={} h={} w={} pad=({},{},{},{}) valign={:?} aim={} bf={} paras={} text=\"{}\"",
-                                    indent, ci, cell.row, cell.col, cell.row_span, cell.col_span,
-                                    cell.height, cell.width,
-                                    cell.padding.left, cell.padding.right, cell.padding.top, cell.padding.bottom,
-                                    cell.vertical_align,
-                                    cell.apply_inner_margin,
-                                    cell.border_fill_id, cell.paragraphs.len(), text_preview);
-                                if let Some(ref fname) = cell.field_name {
-                                    println!("{}  field=\"{}\"", indent, fname);
-                                }
-                                // 셀 내 LINE_SEG 상세
-                                for (pi, cp) in cell.paragraphs.iter().enumerate() {
-                                    if !cp.line_segs.is_empty() || !cp.controls.is_empty() {
-                                        let ls_info: Vec<String> = cp
-                                            .line_segs
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(li, ls)| {
-                                                format!(
-                                                    "ls[{}] vpos={} lh={} ls={}",
-                                                    li,
-                                                    ls.vertical_pos,
-                                                    ls.line_height,
-                                                    ls.line_spacing
-                                                )
-                                            })
-                                            .collect();
-                                        println!(
-                                            "{}  p[{}] ps_id={} ctrls={} text_len={} {}",
-                                            indent,
-                                            pi,
-                                            cp.para_shape_id,
-                                            cp.controls.len(),
-                                            cp.text.len(),
-                                            ls_info.join(", ")
-                                        );
-                                    }
-                                    // 셀 내부 컨트롤 상세
-                                    for (ci, ctrl) in cp.controls.iter().enumerate() {
-                                        match ctrl {
-                                            Control::Picture(p) => {
-                                                println!("{}    ctrl[{}] 그림: bin_id={}, w={} h={} ({:.1}×{:.1}mm), tac={}, wrap={:?}, vert={:?}(off={}), horz={:?}(off={}), orig={}×{}, cur={}×{}, crop=({},{},{},{})",
-                                                    indent, ci, p.image_attr.bin_data_id,
-                                                    p.common.width, p.common.height,
-                                                    p.common.width as f64 / 7200.0 * 25.4,
-                                                    p.common.height as f64 / 7200.0 * 25.4,
-                                                    p.common.treat_as_char,
-                                                    p.common.text_wrap, p.common.vert_rel_to, p.common.vertical_offset,
-                                                    p.common.horz_rel_to, p.common.horizontal_offset,
-                                                    p.shape_attr.original_width, p.shape_attr.original_height,
-                                                    p.shape_attr.current_width, p.shape_attr.current_height,
-                                                    p.crop.left, p.crop.top, p.crop.right, p.crop.bottom);
-                                                println!("{}      [image_attr] effect={:?} brightness={} contrast={} watermark={}",
-                                                    indent, p.image_attr.effect, p.image_attr.brightness, p.image_attr.contrast,
-                                                    p.image_attr.watermark_preset().unwrap_or("none"));
-                                            }
-                                            Control::Shape(s) => {
-                                                println!(
-                                                    "{}    ctrl[{}] {}: tac={}, wrap={:?}",
-                                                    indent,
-                                                    ci,
-                                                    s.shape_name(),
-                                                    s.common().treat_as_char,
-                                                    s.common().text_wrap
-                                                );
-                                            }
-                                            Control::PageHide(ph) => {
-                                                println!("{}    ctrl[{}] PageHide: header={} footer={} master={} border={} fill={} page_num={}",
-                                                    indent, ci,
-                                                    ph.hide_header, ph.hide_footer, ph.hide_master_page,
-                                                    ph.hide_border, ph.hide_fill, ph.hide_page_num);
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                    // 내부 표 재귀
-                                    if depth < 3 {
-                                        for ctrl in &cp.controls {
-                                            if let Control::Table(inner) = ctrl {
-                                                println!("{}  p[{}] 내부표: {}행×{}열, 셀={}, cs={}, pad=({},{},{},{})",
-                                                    indent, pi, inner.row_count, inner.col_count,
-                                                    inner.cells.len(), inner.cell_spacing,
-                                                    inner.padding.left, inner.padding.right, inner.padding.top, inner.padding.bottom);
-                                                let next_indent = format!("{}    ", indent);
-                                                dump_table_deep(inner, &next_indent, depth + 1);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        dump_table_deep(table, &format!("{}  ", prefix), 0);
-                    }
-                    Control::Shape(shape) => {
-                        print!("{}", prefix);
-                        dump_shape(shape, "  ", &dump_common, &dump_shape_attr);
-                    }
-                    Control::Picture(pic) => {
-                        let sa = &pic.shape_attr;
-                        println!("{}그림: bin_id={}, common={}×{} ({:.1}×{:.1}mm), orig={}×{} ({:.1}×{:.1}mm), cur={}×{} ({:.1}×{:.1}mm), tac={}",
-                            prefix, pic.image_attr.bin_data_id, pic.common.width, pic.common.height,
-                            pic.common.width as f64 / 7200.0 * 25.4, pic.common.height as f64 / 7200.0 * 25.4,
-                            sa.original_width, sa.original_height,
-                            sa.original_width as f64 / 7200.0 * 25.4, sa.original_height as f64 / 7200.0 * 25.4,
-                            sa.current_width, sa.current_height,
-                            sa.current_width as f64 / 7200.0 * 25.4, sa.current_height as f64 / 7200.0 * 25.4,
-                            pic.common.treat_as_char);
-                        println!(
-                            "{}  [image_attr] effect={:?} brightness={} contrast={} watermark={}{}",
-                            prefix,
-                            pic.image_attr.effect,
-                            pic.image_attr.brightness,
-                            pic.image_attr.contrast,
-                            pic.image_attr.watermark_preset().unwrap_or("none"),
-                            pic.image_attr
-                                .external_path
-                                .as_ref()
-                                .map(|p| format!(" external_path=\"{}\"", p))
-                                .unwrap_or_default()
-                        );
-                        println!("{}  border_x={:?} border_y={:?} border_color=#{:06X} border_width={} ({:.2}mm) border_attr={:?}",
-                            prefix, pic.border_x, pic.border_y,
-                            pic.border_color, pic.border_width, pic.border_width as f64 / 7200.0 * 25.4,
-                            pic.border_attr);
-                        println!(
-                            "{}  crop=({},{},{},{}) crop_mm=({:.2},{:.2},{:.2},{:.2})",
-                            prefix,
-                            pic.crop.left,
-                            pic.crop.top,
-                            pic.crop.right,
-                            pic.crop.bottom,
-                            pic.crop.left as f64 / 7200.0 * 25.4,
-                            pic.crop.top as f64 / 7200.0 * 25.4,
-                            pic.crop.right as f64 / 7200.0 * 25.4,
-                            pic.crop.bottom as f64 / 7200.0 * 25.4
-                        );
-                        if let Some(ref cap) = pic.caption {
-                            let cap_text: String = cap
-                                .paragraphs
-                                .iter()
-                                .map(|p| p.text.clone())
-                                .collect::<Vec<_>>()
-                                .join("|");
-                            println!(
-                                "{}  caption: dir={:?} width={} paras={} text={:?}",
-                                prefix,
-                                cap.direction,
-                                cap.width,
-                                cap.paragraphs.len(),
-                                cap_text
-                            );
-                        }
-                        let shape_indent = format!("{}  ", prefix);
-                        dump_shape_attr(sa, &shape_indent);
-                        dump_common(&pic.common, "  ");
-                    }
-                    Control::Header(h) => {
-                        let text: String = h
-                            .paragraphs
-                            .iter()
-                            .filter(|p| !p.text.is_empty())
-                            .map(|p| p.text.clone())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        println!(
-                            "{}머리말({:?}): paras={} \"{}\"",
-                            prefix,
-                            h.apply_to,
-                            h.paragraphs.len(),
-                            text
-                        );
-                        for (hpi, hp) in h.paragraphs.iter().enumerate() {
-                            if !hp.controls.is_empty() {
-                                for (hci, hc) in hp.controls.iter().enumerate() {
-                                    let cn = match hc {
-                                        Control::AutoNumber(an) => {
-                                            format!("자동번호({:?})", an.number_type)
-                                        }
-                                        Control::Shape(s) => {
-                                            let c = s.common();
-                                            let mut desc = format!(
-                                                "Shape horz={:?}/{} halign={:?} w={} h={}",
-                                                c.horz_rel_to,
-                                                c.horizontal_offset,
-                                                c.horz_align,
-                                                c.width,
-                                                c.height
-                                            );
-                                            if let Some(tb) =
-                                                s.drawing().and_then(|d| d.text_box.as_ref())
-                                            {
-                                                let text: String = tb
-                                                    .paragraphs
-                                                    .iter()
-                                                    .flat_map(|p| p.text.chars().take(20))
-                                                    .collect();
-                                                desc += &format!(" text={:?}", text);
-                                            }
-                                            desc
-                                        }
-                                        Control::Table(t) => {
-                                            let mut desc = format!(
-                                                "표 {}행×{}열 셀={}",
-                                                t.row_count,
-                                                t.col_count,
-                                                t.cells.len()
-                                            );
-                                            for (si, cell) in t.cells.iter().enumerate() {
-                                                let cell_text: String = cell
-                                                    .paragraphs
-                                                    .iter()
-                                                    .flat_map(|p| p.text.chars().take(20))
-                                                    .collect();
-                                                desc += &format!(
-                                                    "\n{}    셀[{}] text={:?}",
-                                                    prefix, si, cell_text
-                                                );
-                                                for (cpi, cp) in cell.paragraphs.iter().enumerate()
-                                                {
-                                                    for (cci, cc) in cp.controls.iter().enumerate()
-                                                    {
-                                                        let ccn = match cc {
-                                                            Control::AutoNumber(an) => format!(
-                                                                "자동번호({:?})",
-                                                                an.number_type
-                                                            ),
-                                                            Control::Shape(s) => {
-                                                                let c = s.common();
-                                                                let mut d = format!("Shape vert={:?}/{} valign={:?} horz={:?}/{} halign={:?} w={} h={}",
-                                                c.vert_rel_to, c.vertical_offset, c.vert_align,
-                                                c.horz_rel_to, c.horizontal_offset, c.horz_align, c.width, c.height);
-                                                                if let Some(tb) =
-                                                                    s.drawing().and_then(|dd| {
-                                                                        dd.text_box.as_ref()
-                                                                    })
-                                                                {
-                                                                    for (tpi, tp) in tb
-                                                                        .paragraphs
-                                                                        .iter()
-                                                                        .enumerate()
-                                                                    {
-                                                                        let t: String = tp
-                                                                            .text
-                                                                            .chars()
-                                                                            .take(30)
-                                                                            .collect();
-                                                                        d += &format!(" tb_p[{}] ps_id={} text={:?}", tpi, tp.para_shape_id, t);
-                                                                    }
-                                                                }
-                                                                d
-                                                            }
-                                                            _ => format!(
-                                                                "{:?}",
-                                                                std::mem::discriminant(cc)
-                                                            ),
-                                                        };
-                                                        desc += &format!(
-                                                            "\n{}      p[{}]c[{}]: {}",
-                                                            prefix, cpi, cci, ccn
-                                                        );
-                                                    }
-                                                }
-                                            }
-                                            desc
-                                        }
-                                        Control::Picture(pic) => {
-                                            let sa = &pic.shape_attr;
-                                            format!("그림: bin_id={}, common={}×{} ({:.1}×{:.1}mm), orig={}×{} ({:.1}×{:.1}mm), cur={}×{} ({:.1}×{:.1}mm), tac={}, crop=({},{},{},{}) crop_mm=({:.2},{:.2},{:.2},{:.2})",
-                                            pic.image_attr.bin_data_id, pic.common.width, pic.common.height,
-                                            pic.common.width as f64 / 7200.0 * 25.4, pic.common.height as f64 / 7200.0 * 25.4,
-                                            sa.original_width, sa.original_height,
-                                            sa.original_width as f64 / 7200.0 * 25.4, sa.original_height as f64 / 7200.0 * 25.4,
-                                            sa.current_width, sa.current_height,
-                                            sa.current_width as f64 / 7200.0 * 25.4, sa.current_height as f64 / 7200.0 * 25.4,
-                                            pic.common.treat_as_char,
-                                            pic.crop.left, pic.crop.top, pic.crop.right, pic.crop.bottom,
-                                            pic.crop.left as f64 / 7200.0 * 25.4, pic.crop.top as f64 / 7200.0 * 25.4,
-                                            pic.crop.right as f64 / 7200.0 * 25.4, pic.crop.bottom as f64 / 7200.0 * 25.4)
-                                        }
-                                        _ => format!("{:?}", std::mem::discriminant(hc)),
-                                    };
-                                    let display = if cn.chars().count() > 30 {
-                                        format!(
-                                            "{}...(truncated)",
-                                            cn.chars().take(30).collect::<String>()
-                                        )
-                                    } else {
-                                        cn
-                                    };
-                                    println!("{}  hp[{}] ctrl[{}]: {}", prefix, hpi, hci, display);
-                                }
-                            }
-                        }
-                    }
-                    Control::Footer(f) => {
-                        let text: String = f
-                            .paragraphs
-                            .iter()
-                            .filter(|p| !p.text.is_empty())
-                            .map(|p| p.text.clone())
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        println!(
-                            "{}꼬리말({:?}): paras={} \"{}\"",
-                            prefix,
-                            f.apply_to,
-                            f.paragraphs.len(),
-                            text
-                        );
-                        for (fpi, fp) in f.paragraphs.iter().enumerate() {
-                            if !fp.controls.is_empty() {
-                                for (fci, fc) in fp.controls.iter().enumerate() {
-                                    let cn = match fc {
-                                        Control::Picture(pic) => {
-                                            let sa = &pic.shape_attr;
-                                            format!("그림: bin_id={}, common={}×{} ({:.1}×{:.1}mm), orig={}×{} ({:.1}×{:.1}mm), cur={}×{} ({:.1}×{:.1}mm), tac={}, crop=({},{},{},{}) crop_mm=({:.2},{:.2},{:.2},{:.2})",
-                                            pic.image_attr.bin_data_id, pic.common.width, pic.common.height,
-                                            pic.common.width as f64 / 7200.0 * 25.4, pic.common.height as f64 / 7200.0 * 25.4,
-                                            sa.original_width, sa.original_height,
-                                            sa.original_width as f64 / 7200.0 * 25.4, sa.original_height as f64 / 7200.0 * 25.4,
-                                            sa.current_width, sa.current_height,
-                                            sa.current_width as f64 / 7200.0 * 25.4, sa.current_height as f64 / 7200.0 * 25.4,
-                                            pic.common.treat_as_char,
-                                            pic.crop.left, pic.crop.top, pic.crop.right, pic.crop.bottom,
-                                            pic.crop.left as f64 / 7200.0 * 25.4, pic.crop.top as f64 / 7200.0 * 25.4,
-                                            pic.crop.right as f64 / 7200.0 * 25.4, pic.crop.bottom as f64 / 7200.0 * 25.4)
-                                        }
-                                        _ => format!("{:?}", std::mem::discriminant(fc)),
-                                    };
-                                    println!("{}  fp[{}] ctrl[{}]: {}", prefix, fpi, fci, cn);
-                                }
-                            }
-                        }
-                    }
-                    Control::Footnote(fn_) => {
-                        println!("{}각주: paragraphs={}", prefix, fn_.paragraphs.len());
-                    }
-                    Control::Endnote(en) => {
-                        println!("{}미주: paragraphs={}", prefix, en.paragraphs.len());
-                    }
-                    Control::AutoNumber(an) => {
-                        println!(
-                            "{}자동번호: type={:?}, number={}",
-                            prefix, an.number_type, an.number
-                        );
-                    }
-                    Control::NewNumber(nn) => {
-                        println!(
-                            "{}새번호: type={:?}, number={}",
-                            prefix, nn.number_type, nn.number
-                        );
-                    }
-                    Control::PageNumberPos(pn) => {
-                        println!(
-                            "{}쪽번호위치: format={}, pos={}",
-                            prefix, pn.format, pn.position
-                        );
-                    }
-                    Control::Bookmark(bm) => {
-                        println!("{}책갈피: \"{}\"", prefix, bm.name);
-                    }
-                    Control::Hyperlink(hl) => {
-                        println!("{}하이퍼링크: \"{}\"", prefix, hl.url);
-                    }
-                    Control::Ruby(r) => {
-                        println!("{}덧말: \"{}\"", prefix, r.ruby_text);
-                    }
-                    Control::PageHide(ph) => {
-                        println!("{}감추기: header={}, footer={}, master={}, border={}, fill={}, page_num={}",
-                            prefix, ph.hide_header, ph.hide_footer, ph.hide_master_page, ph.hide_border, ph.hide_fill, ph.hide_page_num);
-                    }
-                    Control::HiddenComment(_) => {
-                        println!("{}숨은설명", prefix);
-                    }
-                    Control::Field(f) => {
-                        let name = f.field_name().unwrap_or("(이름없음)");
-                        println!(
-                            "{}필드: {:?} name=\"{}\" cmd=\"{}\"",
-                            prefix, f.field_type, name, f.command
-                        );
-                    }
-                    Control::CharOverlap(co) => {
-                        println!("{}글자겹침: {:?}", prefix, co.chars);
-                    }
-                    Control::Equation(eq) => {
-                        println!(
-                            "{}수식: script=\"{}\" font_size={} font=\"{}\" size={}x{} tac={}",
-                            prefix,
-                            eq.script,
-                            eq.font_size,
-                            eq.font_name,
-                            eq.common.width,
-                            eq.common.height,
-                            eq.common.treat_as_char
-                        );
-                    }
-                    Control::Form(f) => {
-                        println!(
-                            "{}양식개체: {:?} name=\"{}\" caption=\"{}\" {}x{}",
-                            prefix, f.form_type, f.name, f.caption, f.width, f.height
-                        );
-                    }
-                    Control::Unknown(u) => {
-                        println!("{}알수없음: ctrl_id={:#010x}", prefix, u.ctrl_id);
-                    }
-                }
-            }
-        }
-    }
-
-    println!(
-        "\n=== 완료: {} 구역, {} 문단 ===",
-        document.sections.len(),
-        document
-            .sections
-            .iter()
-            .map(|s| s.paragraphs.len())
-            .sum::<usize>()
-    );
-}
-
-fn diag_document(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("오류: HWP 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp diag <파일.hwp>");
-        return;
-    }
-
-    let file_path = &args[0];
-    let data = match fs::read(file_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", file_path, e);
-            return;
-        }
-    };
-
-    let doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    let document = doc.document();
-    use rhwp::model::style::HeadType;
-
-    // === DocInfo 요약 ===
-    println!("=== DocInfo 요약 ===");
-    println!("  Numbering: {}개", document.doc_info.numberings.len());
-    for (i, num) in document.doc_info.numberings.iter().enumerate() {
-        let formats: Vec<String> = num
-            .level_formats
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| !f.is_empty())
-            .map(|(lv, f)| format!("L{}=\"{}\"", lv + 1, f))
-            .collect();
-        println!(
-            "    [{}] start={}, formats: {}",
-            i,
-            num.start_number,
-            formats.join(", ")
-        );
-    }
-
-    println!("  Bullet: {}개", document.doc_info.bullets.len());
-    for (i, bullet) in document.doc_info.bullets.iter().enumerate() {
-        println!(
-            "    [{}] char='{}' (U+{:04X})",
-            i, bullet.bullet_char, bullet.bullet_char as u32
-        );
-    }
-
-    // === ParaShape head_type 분포 ===
-    println!("\n=== ParaShape head_type 분포 ===");
-    let mut count_none = 0u32;
-    let mut count_outline = 0u32;
-    let mut count_number = 0u32;
-    let mut count_bullet = 0u32;
-    for ps in &document.doc_info.para_shapes {
-        match ps.head_type {
-            HeadType::None => count_none += 1,
-            HeadType::Outline => count_outline += 1,
-            HeadType::Number => count_number += 1,
-            HeadType::Bullet => count_bullet += 1,
-        }
-    }
-    println!(
-        "  None: {}개, Outline: {}개, Number: {}개, Bullet: {}개",
-        count_none, count_outline, count_number, count_bullet
-    );
-
-    // === SectionDef 개요번호 ===
-    println!("\n=== SectionDef 개요번호 ===");
-    for (sec_idx, section) in document.sections.iter().enumerate() {
-        // SectionDef의 raw_ctrl_extra에서 바이트 14-15 추출 (outline_numbering_id)
-        // 현재 outline_numbering_id 필드가 없으므로 파싱 전 상태에서는 raw_ctrl_extra 참조
-        // 6단계에서 필드 추가 후 직접 참조로 변경 예정
-        let sd = &section.section_def;
-        let num_ref = if sd.outline_numbering_id > 0 {
-            format!(" → Numbering[{}]", sd.outline_numbering_id - 1)
-        } else {
-            " (없음)".to_string()
-        };
-        println!(
-            "  구역{}: outline_numbering_id={}{}, flags={:#010x}",
-            sec_idx, sd.outline_numbering_id, num_ref, sd.flags
-        );
-    }
-
-    // === 비None head_type 문단 ===
-    println!("\n=== 비None head_type 문단 ===");
-    for (sec_idx, section) in document.sections.iter().enumerate() {
-        for (para_idx, para) in section.paragraphs.iter().enumerate() {
-            if let Some(ps) = document
-                .doc_info
-                .para_shapes
-                .get(para.para_shape_id as usize)
-            {
-                if ps.head_type != HeadType::None {
-                    let text_preview: String = para.text.chars().take(40).collect();
-                    let text_display = if para.text.chars().count() > 40 {
-                        format!("\"{}...\"", text_preview)
-                    } else {
-                        format!("\"{}\"", text_preview)
-                    };
-                    println!(
-                        "  구역{}:문단{} head={:?} level={} num_id={} text={}",
-                        sec_idx,
-                        para_idx,
-                        ps.head_type,
-                        ps.para_level,
-                        ps.numbering_id,
-                        text_display
-                    );
-                }
-            }
-        }
-    }
-}
-
-fn convert_hwp(args: &[String]) {
-    if args.len() < 2 {
-        eprintln!("오류: 입력 파일과 출력 파일 경로를 지정해주세요.");
-        eprintln!("사용법: rhwp convert <입력.hwp|입력.hwpx> <출력.hwp>");
-        return;
-    }
-
-    let input_path = &args[0];
-    let output_path = &args[1];
-
-    // 입력 파일 읽기
-    let data = match fs::read(input_path) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다 - {}: {}", input_path, e);
-            return;
-        }
-    };
-
-    // 문서 로드
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: HWP 파싱 실패 - {}", e);
-            return;
-        }
-    };
-
-    let was_distribution = doc.document().header.distribution;
-    if !was_distribution {
-        println!("{}: 이미 편집 가능한 문서입니다.", input_path);
-    }
-
-    // 변환
-    match doc.convert_to_editable_native() {
-        Ok(_) => {
-            if was_distribution {
-                println!("배포용 → 편집 가능 변환 완료");
-            }
-        }
-        Err(e) => {
-            eprintln!("오류: 변환 실패 - {}", e);
-            return;
-        }
-    }
-
-    // 직렬화
-    match doc.export_hwp_with_adapter() {
-        Ok(bytes) => match fs::write(output_path, &bytes) {
-            Ok(_) => {
-                println!("저장 완료: {} ({}KB)", output_path, bytes.len() / 1024);
-            }
-            Err(e) => {
-                eprintln!("오류: 파일 저장 실패 - {}: {}", output_path, e);
-            }
-        },
-        Err(e) => {
-            eprintln!("오류: 직렬화 실패 - {}", e);
-        }
-    }
-}
-
-/// `rhwp build-from-ingest <ingest.json> [--media-dir <dir>] -o <out.hwpx>`
+/// [#3880 T1] `info --json` 의 `warnings[]` — 파싱이 건너뛴 것의 기계 판정용.
 ///
-/// Claude Code Skill (`rhwp-exam-ingest`)이 생성한 JSON 중간 표현을 HWPX로 변환한다.
-/// Task #660 (Neumann 본 작업 1단계).
-fn build_from_ingest(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("사용법: rhwp build-from-ingest <ingest.json> [--media-dir <dir>] -o <out.hwpx>");
-        return;
-    }
-
-    let mut input_path: Option<&str> = None;
-    let mut output_path: Option<&str> = None;
-    let mut media_dir: Option<&str> = None;
-
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-o" | "--output" => {
-                if i + 1 >= args.len() {
-                    eprintln!("오류: -o 옵션에 값이 필요합니다");
-                    return;
-                }
-                output_path = Some(&args[i + 1]);
-                i += 2;
-            }
-            "--media-dir" => {
-                if i + 1 >= args.len() {
-                    eprintln!("오류: --media-dir 옵션에 값이 필요합니다");
-                    return;
-                }
-                media_dir = Some(&args[i + 1]);
-                i += 2;
-            }
-            other => {
-                if input_path.is_none() {
-                    input_path = Some(other);
-                } else {
-                    eprintln!("경고: 알 수 없는 인자 '{}' 무시", other);
-                }
-                i += 1;
-            }
-        }
-    }
-
-    let input = match input_path {
-        Some(p) => p,
-        None => {
-            eprintln!("오류: 입력 ingest JSON 경로가 누락되었습니다");
-            return;
-        }
+/// 현재 원천은 HML 파서의 `hml_metadata().warnings` 하나다. 다른 포맷이 같은 기구를
+/// 갖추면 여기에 합류시킨다 — 그때까지 이 배열이 비어 있다고 해서 "문서가 온전하다"는
+/// 뜻은 아니며, 그 한계는 `mydocs/manual/cli_commands.md` 에 적는다.
+fn info_warnings_value(doc: &rhwp::wasm_api::HwpDocument) -> serde_json::Value {
+    let Some(metadata) = doc.hml_metadata() else {
+        return serde_json::Value::Array(Vec::new());
     };
-    let output = match output_path {
-        Some(p) => p,
-        None => {
-            eprintln!("오류: -o <출력 경로> 가 누락되었습니다");
-            return;
-        }
-    };
+    serde_json::Value::Array(
+        metadata
+            .warnings
+            .iter()
+            .map(|w| {
+                serde_json::json!({
+                    "code": format!("{:?}", w.code),
+                    "xmlPath": w.xml_path,
+                    "message": w.message,
+                })
+            })
+            .collect(),
+    )
+}
 
-    let bytes = match fs::read(input) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("오류: 입력 파일 읽기 실패 - {}: {}", input, e);
-            return;
-        }
-    };
+/// [#3719 §6-10] `extract-data --json` 봉투.
+///
+/// `counts` 는 **요청한 종류에 대한 문서 전체 건수**다(`--limit` 절단 전). 요청하지 않은
+/// 종류의 키는 아예 넣지 않는다 — `--kind date` 인데 `"amount": 0` 이 보이면 "금액이 없다"로
+/// 오독되기 때문이다. `itemCount` 는 실제 반환된 건수이고, `totalItemCount`·`truncated` 가
+/// 절단 사실을 드러낸다(#3353 의 `search` 와 같은 어휘).
+fn extract_data_json_value(
+    file_path: &str,
+    kind: &str,
+    items: &[rhwp::document_core::queries::extract_data::DataItem],
+    total_item_count: usize,
+    counts: &serde_json::Value,
+) -> serde_json::Value {
+    provenance::marked(
+        serde_json::json!({
+            "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+            "source": file_path,
+            "kind": kind,
+            "itemCount": items.len(),
+            "totalItemCount": total_item_count,
+            "truncated": items.len() < total_item_count,
+            "counts": counts,
+            "items": items,
+        }),
+        "extract-data",
+    )
+}
 
-    let ingest = match rhwp::parser::ingest::parse_ingest_bytes(&bytes) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: ingest JSON 파싱 실패 - {}", e);
-            return;
-        }
-    };
+#[derive(Debug, Default, Clone, Copy)]
+struct ConversionVerifyOptions {
+    verify: bool,
+    verify_pages: bool,
+    /// [#3596] 봉투를 stdout 순수 JSON 으로. export-hwpx 만 허용한다(`allow_json`).
+    json: bool,
+}
 
-    if let Some(md) = media_dir {
-        let p = Path::new(md);
-        if !p.exists() {
-            eprintln!(
-                "경고: 미디어 디렉토리가 존재하지 않습니다 ({}). 본 단계는 이미지 placeholder로 처리됩니다.",
-                md
-            );
-        }
-    }
-
-    let doc = rhwp::document_core::builders::exam_paper::build_exam_paper(&ingest);
-
-    let hwpx_bytes = match rhwp::serializer::serialize_hwpx(&doc) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("오류: HWPX 직렬화 실패 - {}", e);
-            return;
-        }
-    };
-
-    match fs::write(output, &hwpx_bytes) {
-        Ok(_) => println!(
-            "저장 완료: {} ({}바이트, 문제 {}개, 문단 {}개)",
-            output,
-            hwpx_bytes.len(),
-            ingest.questions.len(),
-            doc.sections
-                .iter()
-                .map(|s| s.paragraphs.len())
-                .sum::<usize>()
-        ),
-        Err(e) => eprintln!("오류: 파일 저장 실패 - {}: {}", output, e),
+impl ConversionVerifyOptions {
+    fn enabled(self) -> bool {
+        self.verify || self.verify_pages
     }
 }
 
-fn dump_raw_records(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("사용법: rhwp dump-records <파일.hwp>");
-        return;
-    }
-    let data = match fs::read(&args[0]) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: {}", e);
-            return;
+fn paths_refer_to_same_file(input: &Path, output: &Path) -> bool {
+    input == output
+        || paths_have_same_file_identity(input, output)
+        || match (input.canonicalize(), output.canonicalize()) {
+            (Ok(input), Ok(output)) => input == output,
+            _ => false,
         }
-    };
-    use rhwp::parser::cfb_reader::CfbReader;
-    use rhwp::parser::record::Record;
-    let mut cfb = match CfbReader::open(&data) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("오류: {:?}", e);
-            return;
-        }
-    };
-    // FileHeader에서 압축 여부 확인
-    let header = cfb.read_stream_raw("FileHeader").unwrap_or_default();
-    let compressed = header.len() >= 40 && (header[36] & 0x01) != 0;
-    let section = match cfb.read_body_text_section(0, compressed, false) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("오류: {:?}", e);
-            return;
-        }
-    };
-    let records = match Record::read_all(&section) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("오류: {:?}", e);
-            return;
-        }
-    };
-    let tag_name = |id: u16| -> &str {
-        match id {
-            66 => "PARA_HEADER",
-            67 => "PARA_TEXT",
-            68 => "PARA_CHAR_SHAPE",
-            69 => "PARA_LINE_SEG",
-            70 => "PARA_RANGE_TAG",
-            71 => "CTRL_HEADER",
-            72 => "LIST_HEADER",
-            73 => "PAGE_DEF",
-            74 => "FOOTNOTE_SHAPE",
-            75 => "PAGE_BORDER_FILL",
-            76 => "SHAPE_COMPONENT",
-            77 => "TABLE",
-            78 => "SC_LINE",
-            79 => "SC_RECT",
-            80 => "SC_ELLIPSE",
-            81 => "SC_ARC",
-            82 => "SC_POLYGON",
-            83 => "SC_CURVE",
-            85 => "SC_PICTURE",
-            86 => "SC_CONTAINER",
-            89 => "CTRL_DATA",
-            _ => "?",
-        }
-    };
-    for (i, rec) in records.iter().enumerate() {
-        let indent = "  ".repeat(rec.level as usize);
-        println!(
-            "[{:3}] {}tag={:<3} {:16} lv={} sz={}",
-            i,
-            indent,
-            rec.tag_id,
-            tag_name(rec.tag_id),
-            rec.level,
-            rec.data.len()
-        );
-        // shape 관련 레코드만 hex 덤프
-        if matches!(rec.tag_id, 71 | 72 | 76 | 79 | 85 | 89) {
-            // 16바이트씩 나눠서 hex 출력
-            for chunk in rec.data.chunks(16) {
-                let hex: String = chunk
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                println!("       {}  {}", indent, hex);
-            }
-        }
+}
+
+#[cfg(unix)]
+fn paths_have_same_file_identity(input: &Path, output: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+
+    match (input.metadata(), output.metadata()) {
+        (Ok(input), Ok(output)) => input.dev() == output.dev() && input.ino() == output.ino(),
+        _ => false,
     }
 }
 
-fn test_shape_roundtrip(args: &[String]) {
+#[cfg(not(unix))]
+fn paths_have_same_file_identity(_input: &Path, _output: &Path) -> bool {
+    false
+}
+
+/// 옵션을 받지 않는 내부 개발 명령의 위치 인자를 엄격히 검증한다.
+///
+/// 이 명령들은 capabilities 에도 노출되어 있다. 플래그처럼 보이는 값을 위치 인자로
+/// 삼키거나 여분 인자를 무시하면, 호출자는 오타 난 자동화를 성공으로 오인한다.
+fn validate_internal_positionals(command: &str, args: &[String], max: usize) -> Result<(), i32> {
+    if let Some(flag) = args.iter().find(|arg| arg.starts_with('-')) {
+        eprintln!("오류: {command} 은 알 수 없는 옵션을 받지 않습니다 - {flag}");
+        return Err(EXIT_USAGE);
+    }
+    if args.len() > max {
+        eprintln!("오류: {command} 은 위치 인자를 최대 {max}개만 받습니다.");
+        return Err(EXIT_USAGE);
+    }
+    Ok(())
+}
+
+fn test_shape_roundtrip(args: &[String]) -> i32 {
+    if let Err(code) = validate_internal_positionals("test-shape", args, 2) {
+        return code;
+    }
     let input = if args.is_empty() {
         "saved/g555-s.hwp"
     } else {
@@ -3996,7 +707,7 @@ fn test_shape_roundtrip(args: &[String]) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("입력 파일 읽기 오류: {}", e);
-            return;
+            return EXIT_RUNTIME;
         }
     };
 
@@ -4004,7 +715,7 @@ fn test_shape_roundtrip(args: &[String]) {
         Ok(d) => d,
         Err(e) => {
             eprintln!("HWP 파싱 오류: {:?}", e);
-            return;
+            return EXIT_RUNTIME;
         }
     };
 
@@ -4030,7 +741,7 @@ fn test_shape_roundtrip(args: &[String]) {
         Ok(r) => eprintln!("글상자 생성 성공: {}", r),
         Err(e) => {
             eprintln!("글상자 생성 실패: {:?}", e);
-            return;
+            return EXIT_RUNTIME;
         }
     }
 
@@ -4038,97 +749,42 @@ fn test_shape_roundtrip(args: &[String]) {
         Ok(bytes) => {
             if let Err(e) = fs::write(output, &bytes) {
                 eprintln!("파일 저장 오류: {}", e);
-            } else {
-                eprintln!("저장 완료: {} ({}KB)", output, bytes.len() / 1024);
+                return EXIT_RUNTIME;
             }
+            eprintln!("저장 완료: {} ({}KB)", output, bytes.len() / 1024);
+            EXIT_OK
         }
-        Err(e) => eprintln!("직렬화 오류: {:?}", e),
+        Err(e) => {
+            eprintln!("직렬화 오류: {:?}", e);
+            EXIT_RUNTIME
+        }
     }
 }
 
-/// 캡션 방향별 테스트: 4개 이미지에 각각 Bottom/Top/Left/Right 캡션을 설정하고 SVG 출력
-fn test_caption(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("사용법: rhwp test-caption <파일.hwp>");
-        return;
+fn gen_table(args: &[String]) -> i32 {
+    if let Err(code) = validate_internal_positionals("gen-table", args, 3) {
+        return code;
     }
-
-    let data = match fs::read(&args[0]) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("파일 읽기 오류: {}", e);
-            return;
-        }
+    let rows = match args.first() {
+        Some(value) => match value.parse::<u16>() {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("오류: gen-table 행 수는 0~65535 정수여야 합니다 - {value}");
+                return EXIT_USAGE;
+            }
+        },
+        None => 1000,
     };
-
-    let mut doc = match rhwp::wasm_api::HwpDocument::from_bytes(&data) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("파싱 오류: {}", e);
-            return;
-        }
+    let cols = match args.get(1) {
+        Some(value) => match value.parse::<u16>() {
+            Ok(value) => value,
+            Err(_) => {
+                eprintln!("오류: gen-table 열 수는 0~65535 정수여야 합니다 - {value}");
+                return EXIT_USAGE;
+            }
+        },
+        None => 6,
     };
-
-    // 문단 0: 컨트롤 2,3 / 문단 1: 컨트롤 0,1
-    let pic_refs: [(usize, usize); 4] = [(0, 2), (0, 3), (1, 0), (1, 1)];
-
-    // 4개 이미지에 각각 다른 캡션 방향 설정
-    let directions = [
-        ("Bottom", "Top"),
-        ("Top", "Top"),
-        ("Left", "Center"),
-        ("Right", "Center"),
-    ];
-
-    for (i, ((para, ci), (dir, va))) in pic_refs.iter().zip(directions.iter()).enumerate() {
-        let json = format!(
-            r#"{{"hasCaption":true,"captionDirection":"{}","captionVertAlign":"{}","captionWidth":8504,"captionSpacing":850}}"#,
-            dir, va
-        );
-        println!("[{}] para={}, ci={}, dir={}, va={}", i, para, ci, dir, va);
-        match doc.set_picture_properties_native(0, *para, *ci, &json) {
-            Ok(r) => println!("  결과: {}", r),
-            Err(e) => println!("  오류: {:?}", e),
-        }
-    }
-
-    // 캡션 상태 확인
-    for (i, (para, ci)) in pic_refs.iter().enumerate() {
-        let section = &doc.document().sections[0];
-        let p = &section.paragraphs[*para];
-        if let rhwp::model::control::Control::Picture(pic) = &p.controls[*ci] {
-            println!(
-                "[{}] caption={:?}",
-                i,
-                pic.caption.as_ref().map(|c| {
-                    format!(
-                        "dir={:?}, paras={}, text={:?}",
-                        c.direction,
-                        c.paragraphs.len(),
-                        c.paragraphs.first().map(|p| &p.text)
-                    )
-                })
-            );
-        }
-    }
-
-    // SVG 출력
-    let output_dir = "output/caption-test";
-    let _ = fs::create_dir_all(output_dir);
-    let page_count = doc.page_count();
-    println!("페이지 수: {}", page_count);
-    for p in 0..page_count {
-        let svg = doc.render_page_svg(p).expect("SVG 렌더링 오류");
-        let path = format!("{}/caption-test-p{}.svg", output_dir, p);
-        fs::write(&path, &svg).unwrap();
-        println!("  → {}", path);
-    }
-    println!("완료");
-}
-
-fn gen_table(args: &[String]) {
-    let rows: u16 = args.first().and_then(|s| s.parse().ok()).unwrap_or(1000);
-    let cols: u16 = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(6);
     let output = args
         .get(2)
         .map(|s| s.as_str())
@@ -4208,8 +864,14 @@ fn gen_table(args: &[String]) {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).ok();
     }
-    fs::write(out_path, bytes).expect("파일 저장 실패");
+    if let Err(e) = fs::write(out_path, bytes) {
+        // 종료 코드 계약: 쓰기 실패는 런타임 오류(1)다. 종전에는 .expect() 로 패닉해
+        // 계약에 없는 101 로 끝났다.
+        eprintln!("오류: 파일 저장 실패 - {}: {}", output, e);
+        return EXIT_RUNTIME;
+    }
     println!("저장 완료: {} ({}행 × {}열)", output, rows, cols);
+    EXIT_OK
 }
 
 /// PUA (Private Use Area) 문자 셋트를 입력한 HWP 테스트 문서 생성.
@@ -4221,11 +883,24 @@ fn gen_table(args: &[String]) {
 /// 사용:
 ///   rhwp gen-pua [output_path]
 ///   기본 출력: output/pua-test.hwp
-fn gen_pua_test(args: &[String]) {
-    let output = args
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("output/pua-test.hwp");
+fn gen_pua_test(args: &[String]) -> i32 {
+    if let Err(code) = validate_internal_positionals("gen-pua", args, 1) {
+        return code;
+    }
+    // gen-pua 의 positional 은 입력이 아니라 **출력** 경로다. capabilities 가 다른
+    // 진단 명령과 나란히 노출하는 탓에 `rhwp gen-pua 문서.hwp` 를 "이 파일을 조사"로
+    // 읽은 호출이 실제로 원본을 말없이 덮어썼다(#3691 조사 중 발생). 사용자가 명시한
+    // 경로가 이미 있으면 거부한다 — 기본 경로는 재생성 대상이라 검사에서 제외한다.
+    let explicit = args.first().map(|s| s.as_str());
+    if let Some(path) = explicit {
+        if Path::new(path).exists() {
+            eprintln!("오류: gen-pua 의 인자는 생성할 **출력** 경로입니다 (입력 파일이 아닙니다).");
+            eprintln!("      이미 존재하는 파일을 덮어쓰지 않습니다: {}", path);
+            eprintln!("사용법: rhwp gen-pua [출력경로]   # 기본 output/pua-test.hwp");
+            return EXIT_USAGE;
+        }
+    }
+    let output = explicit.unwrap_or("output/pua-test.hwp");
 
     println!("PUA 문자 셋트 입력 HWP 문서 생성 중...");
 
@@ -4300,847 +975,742 @@ fn gen_pua_test(args: &[String]) {
     if let Some(parent) = out_path.parent() {
         fs::create_dir_all(parent).ok();
     }
-    fs::write(out_path, bytes).expect("파일 저장 실패");
+    if let Err(e) = fs::write(out_path, bytes) {
+        // 종료 코드 계약: 쓰기 실패는 런타임 오류(1)다. 종전에는 .expect() 로 패닉해
+        // 계약에 없는 101 로 끝났다.
+        eprintln!("오류: 파일 저장 실패 - {}: {}", output, e);
+        return EXIT_RUNTIME;
+    }
     println!("저장 완료: {} ({} 종 PUA)", output, pua_set.len());
     println!();
     println!("다음 단계:");
     println!("  1. 한컴 2022 편집기에서 본 파일 열기 → PDF 출력 (정답지)");
     println!("  2. rhwp export-svg {} → SVG 출력 비교", output);
     println!("  3. 시각 비교로 매핑 정합 확정");
+    EXIT_OK
 }
 
-fn test_field_roundtrip(args: &[String]) {
-    let input = args
-        .first()
-        .map(|s| s.as_str())
-        .unwrap_or("hwp_webctl/bsbc01_10_000.hwp");
-    let output = args
-        .get(1)
-        .map(|s| s.as_str())
-        .unwrap_or("output/field_test.hwp");
-
-    let data = std::fs::read(input).expect("파일 읽기 실패");
-    let mut core = rhwp::document_core::DocumentCore::from_bytes(&data).expect("문서 파싱 실패");
-
-    // 1. 필드 목록 출력
-    let fields = core.collect_all_fields();
-    println!("=== 필드 목록 ({}개) ===", fields.len());
-    for fi in &fields {
-        let name = fi.field.field_name().unwrap_or("(이름없음)");
-        println!("  {} = \"{}\"", name, fi.value);
-    }
-
-    // 2. 필드에 값 설정
-    let test_data = [
-        ("mbizNm", "청소년 자립지원사업"),
-        ("newCtnuTxt", "계속"),
-        ("chargerNm", "홍길동"),
-        ("telno", "02-1234-5678"),
-        ("sFisYear", "2026"),
-        // 셀 필드
-        ("bizPurps", "청소년 자립 역량 강화"),
-        ("bizPrdTxt", "2026.01 ~ 2026.12"),
-        ("insttNm", "시청 복지과"),
-    ];
-
-    println!("\n=== 필드 값 설정 ===");
-    for (name, value) in &test_data {
-        match core.set_field_value_by_name(name, value) {
-            Ok(r) => println!("  ✓ {} = \"{}\" → {}", name, value, r),
-            Err(e) => println!("  ✗ {} = \"{}\" → {}", name, value, e),
-        }
-    }
-
-    // 3. 설정 후 확인
-    println!("\n=== 설정 후 확인 ===");
-    let fields2 = core.collect_all_fields();
-    for fi in &fields2 {
-        let name = fi.field.field_name().unwrap_or("(이름없음)");
-        println!("  {} = \"{}\"", name, fi.value);
-    }
-
-    // 3.5 pi=0 문단 텍스트 직접 확인
-    let para0 = &core.document().sections[0].paragraphs[0];
-
-    // 4. 직렬화 → 저장
-    let saved = core.export_hwp_native().expect("직렬화 실패");
-    std::fs::write(output, &saved).expect("저장 실패");
-    println!("\n저장: {} ({}바이트)", output, saved.len());
-
-    // 5. 재로딩 → 필드 확인
-    let mut core2 = rhwp::document_core::DocumentCore::from_bytes(&saved).expect("재로딩 실패");
-    let fields3 = core2.collect_all_fields();
-    println!("\n=== 재로딩 후 확인 ===");
-    for fi in &fields3 {
-        let name = fi.field.field_name().unwrap_or("(이름없음)");
-        println!("  {} = \"{}\"", name, fi.value);
-    }
-}
-
-fn control_tag(c: &rhwp::model::control::Control) -> &'static str {
-    use rhwp::model::control::Control;
-    match c {
-        Control::SectionDef(_) => "secd",
-        Control::ColumnDef(_) => "cold",
-        Control::Table(_) => "tbl",
-        Control::Shape(_) => "shape",
-        Control::Picture(_) => "pic",
-        Control::Header(_) => "head",
-        Control::Footer(_) => "foot",
-        Control::Footnote(_) => "fn",
-        Control::Endnote(_) => "en",
-        Control::AutoNumber(_) => "atno",
-        Control::NewNumber(_) => "nwno",
-        Control::PageNumberPos(_) => "pgnp",
-        Control::Bookmark(_) => "bokm",
-        Control::Hyperlink(_) => "hlk",
-        Control::Ruby(_) => "ruby",
-        Control::CharOverlap(_) => "tcps",
-        Control::PageHide(_) => "pghd",
-        Control::HiddenComment(_) => "tcmt",
-        Control::Equation(_) => "eqed",
-        Control::Field(_) => "field",
-        Control::Form(_) => "form",
-        Control::Unknown(_) => "unknown",
-    }
-}
-
-fn diff_table(
-    diffs: &mut Vec<String>,
-    ci: usize,
-    a: &rhwp::model::table::Table,
-    b: &rhwp::model::table::Table,
-) {
-    if a.row_count != b.row_count {
-        diffs.push(format!(
-            "ctrl[{}] tbl rows: A={} vs B={}",
-            ci, a.row_count, b.row_count
-        ));
-    }
-    if a.col_count != b.col_count {
-        diffs.push(format!(
-            "ctrl[{}] tbl cols: A={} vs B={}",
-            ci, a.col_count, b.col_count
-        ));
-    }
-    if a.page_break != b.page_break {
-        diffs.push(format!(
-            "ctrl[{}] tbl page_break: A={:?} vs B={:?}",
-            ci, a.page_break, b.page_break
-        ));
-    }
-    if a.repeat_header != b.repeat_header {
-        diffs.push(format!(
-            "ctrl[{}] tbl repeat_header: A={} vs B={}",
-            ci, a.repeat_header, b.repeat_header
-        ));
-    }
-    if a.cell_spacing != b.cell_spacing {
-        diffs.push(format!(
-            "ctrl[{}] tbl cell_spacing: A={} vs B={}",
-            ci, a.cell_spacing, b.cell_spacing
-        ));
-    }
-    if a.border_fill_id != b.border_fill_id {
-        diffs.push(format!(
-            "ctrl[{}] tbl border_fill_id: A={} vs B={}",
-            ci, a.border_fill_id, b.border_fill_id
-        ));
-    }
-    if a.outer_margin_left != b.outer_margin_left
-        || a.outer_margin_right != b.outer_margin_right
-        || a.outer_margin_top != b.outer_margin_top
-        || a.outer_margin_bottom != b.outer_margin_bottom
-    {
-        diffs.push(format!(
-            "ctrl[{}] tbl outer_margin: A=({},{},{},{}) vs B=({},{},{},{})",
-            ci,
-            a.outer_margin_left,
-            a.outer_margin_top,
-            a.outer_margin_right,
-            a.outer_margin_bottom,
-            b.outer_margin_left,
-            b.outer_margin_top,
-            b.outer_margin_right,
-            b.outer_margin_bottom,
-        ));
-    }
-    diff_common_obj(diffs, ci, "tbl", &a.common, &b.common);
-}
-
-fn diff_common_obj(
-    diffs: &mut Vec<String>,
-    ci: usize,
-    tag: &str,
-    a: &rhwp::model::shape::CommonObjAttr,
-    b: &rhwp::model::shape::CommonObjAttr,
-) {
-    if a.treat_as_char != b.treat_as_char {
-        diffs.push(format!(
-            "ctrl[{}] {} tac: A={} vs B={}",
-            ci, tag, a.treat_as_char, b.treat_as_char
-        ));
-    }
-    if a.text_wrap != b.text_wrap {
-        diffs.push(format!(
-            "ctrl[{}] {} wrap: A={:?} vs B={:?}",
-            ci, tag, a.text_wrap, b.text_wrap
-        ));
-    }
-    if a.width != b.width || a.height != b.height {
-        diffs.push(format!(
-            "ctrl[{}] {} size: A={}x{} vs B={}x{}",
-            ci, tag, a.width, a.height, b.width, b.height
-        ));
-    }
-    if a.vertical_offset != b.vertical_offset {
-        diffs.push(format!(
-            "ctrl[{}] {} v_offset: A={} vs B={}",
-            ci, tag, a.vertical_offset, b.vertical_offset
-        ));
-    }
-    if a.horizontal_offset != b.horizontal_offset {
-        diffs.push(format!(
-            "ctrl[{}] {} h_offset: A={} vs B={}",
-            ci, tag, a.horizontal_offset, b.horizontal_offset
-        ));
-    }
-    if a.vert_rel_to != b.vert_rel_to {
-        diffs.push(format!(
-            "ctrl[{}] {} vert_rel: A={:?} vs B={:?}",
-            ci, tag, a.vert_rel_to, b.vert_rel_to
-        ));
-    }
-    if a.horz_rel_to != b.horz_rel_to {
-        diffs.push(format!(
-            "ctrl[{}] {} horz_rel: A={:?} vs B={:?}",
-            ci, tag, a.horz_rel_to, b.horz_rel_to
-        ));
-    }
-}
-
-/// `tab_extended`(`[u16; 7]`) 두 인라인 탭 레코드가 **의미 있는** 필드에서 다른지 판정.
+/// [#3346] `fields --json` 과 `batch fields` 가 공유하는 필드 레코드 수집.
 ///
-/// HWPX 파서(`parse_tab_extension`)는 인라인 탭을 `ext[0]`=width,
-/// `ext[2]`=`type<<8 | leader`(leader 는 low byte), `ext[6]`=0x0009 마커로만 채우고
-/// `ext[1]`·`ext[3]`·`ext[4]`·`ext[5]`는 0 으로 둔다. HWPX 직렬화(`render_hp_t_content`)도
-/// width/leader/type 를 오직 `ext[0]`·`ext[2]`에서만 읽는다. 반면 HWP5 인라인 탭(8 WCHAR
-/// 블록)은 `ext[1]`을 leader/fill 슬롯으로, `ext[3]`·`ext[4]`·`ext[5]`를 WCHAR 4~6 원본
-/// 바이트(보통 0x20)로 채운다 — 이들은 HWPX `<hp:tab>`에 대응 속성이 없어 HWPX 쪽이 항상
-/// 0 이라, HWPX↔HWP5 parity 비교에서 거의 모든 탭에 거짓 차이(0 vs leader, 0 vs 32)를 만들어
-/// 실제 차이(width/type/leader)를 가린다. 따라서 두 포맷이 공통으로 쓰는 필드
-/// [0]=width, [2]=type/leader 팩, [6]=마커만 비교하고 [1],[3],[4],[5]는 제외한다.
-/// (HWP5 직렬화는 [1],[3..6]을 그대로 보존하므로 self-roundtrip 충실도에는 영향 없음 —
-/// 도구 비교에서만 제외.)
-fn tab_ext_semantic_differs(a: &[u16; 7], b: &[u16; 7]) -> bool {
-    // 두 포맷 공통 필드만: [0]=width, [2]=type<<8|leader, [6]=0x0009 마커.
-    // [1](HWP5 leader/fill 슬롯, HWPX=0)·[3]·[4]·[5](HWP5 예약 바이트, HWPX=0)는 제외.
-    const SEMANTIC: [usize; 3] = [0, 2, 6];
-    SEMANTIC.iter().any(|&k| a[k] != b[k])
+/// 단건/배치가 같은 스키마를 내도록 한 곳에서 만든다.
+pub(crate) fn collect_field_records(doc: &rhwp::wasm_api::HwpDocument) -> Vec<serde_json::Value> {
+    use rhwp::document_core::queries::field_query::NestedEntry;
+
+    doc.collect_all_fields()
+        .iter()
+        .map(|fi| {
+            // 중첩 경로: 표 셀·글상자 안의 필드가 어디에 있는지 — 후속 편집의 좌표다.
+            let nested: Vec<serde_json::Value> = fi
+                .location
+                .nested_path
+                .iter()
+                .map(|e| match e {
+                    NestedEntry::TableCell {
+                        control_index,
+                        cell_index,
+                        para_index,
+                    } => serde_json::json!({
+                        "kind": "tableCell",
+                        "control": control_index,
+                        "cell": cell_index,
+                        "paragraph": para_index,
+                    }),
+                    NestedEntry::TextBox {
+                        control_index,
+                        para_index,
+                    } => serde_json::json!({
+                        "kind": "textBox",
+                        "control": control_index,
+                        "paragraph": para_index,
+                    }),
+                })
+                .collect();
+
+            serde_json::json!({
+                "fieldId": fi.field.field_id,
+                "fieldType": format!("{:?}", fi.field.field_type),
+                "name": fi.field.field_name().unwrap_or(""),
+                "guide": fi.field.guide_text().unwrap_or(""),
+                "memo": fi.field.memo_text().unwrap_or_default(),
+                "command": fi.field.command,
+                "value": fi.value,
+                "editableInForm": fi.field.is_editable_in_form(),
+                "location": {
+                    "section": fi.location.section_index,
+                    "paragraph": fi.location.para_index,
+                    "nested": nested,
+                },
+            })
+        })
+        .collect()
 }
 
-fn ir_diff(args: &[String]) {
-    if args.len() < 2 {
-        eprintln!("사용법: rhwp ir-diff <파일A> <파일B> [-s <구역>] [-p <문단>] [--summary] [--max-lines <N>]");
-        return;
-    }
-
-    let file_a = &args[0];
-    let file_b = &args[1];
-    let mut section_filter: Option<usize> = None;
-    let mut para_filter: Option<usize> = None;
-    // [Task #653 보강] 출력 가드 옵션
-    let mut summary_mode = false;
-    let mut max_lines: Option<usize> = None;
-
-    let mut i = 2;
+/// [#3762] `export-ir-schema` — 공개 IR 의 JSON Schema 를 낸다 (M18 바인딩 착수 조건).
+///
+/// 문서를 입력으로 받지 않는다 — 스키마는 **타입의 자기서술**이지 특정 문서의
+/// 속성이 아니다. capabilities 가 명령 표면을 설명하듯, 이 명령은 문서 모델을
+/// 설명한다. 외부 바인딩 세대가 코드 생성의 단일 출처로 쓴다.
+fn cmd_export_ir_schema(args: &[String]) -> i32 {
+    let mut out_path: Option<&str> = None;
+    let mut json_mode = false;
+    let mut bare = false;
+    let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "-s" | "--section" if i + 1 < args.len() => {
-                section_filter = args[i + 1].parse().ok();
-                i += 2;
-            }
-            "-p" | "--para" if i + 1 < args.len() => {
-                para_filter = args[i + 1].parse().ok();
-                i += 2;
-            }
-            "--summary" => {
-                summary_mode = true;
+            "--json" => json_mode = true,
+            // 봉투 없이 스키마 본문만 — JSON Schema 도구에 바로 먹이려는 용도.
+            "--bare" => bare = true,
+            "-o" | "--out" => {
                 i += 1;
-            }
-            "--max-lines" if i + 1 < args.len() => {
-                max_lines = args[i + 1].parse().ok();
-                i += 2;
-            }
-            _ => {
-                i += 1;
-            }
-        }
-    }
-
-    let data_a = match fs::read(file_a) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: {} 읽기 실패: {}", file_a, e);
-            return;
-        }
-    };
-    let data_b = match fs::read(file_b) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: {} 읽기 실패: {}", file_b, e);
-            return;
-        }
-    };
-
-    let doc_a = match rhwp::parser::parse_document(&data_a) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: {} 파싱 실패: {:?}", file_a, e);
-            return;
-        }
-    };
-    let doc_b = match rhwp::parser::parse_document(&data_b) {
-        Ok(d) => d,
-        Err(e) => {
-            eprintln!("오류: {} 파싱 실패: {:?}", file_b, e);
-            return;
-        }
-    };
-
-    let name_a = Path::new(file_a)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let name_b = Path::new(file_b)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
-    if !summary_mode {
-        println!("=== IR 비교: {} vs {} ===", name_a, name_b);
-    }
-
-    // [Task #653 보강] 출력 가드 상태
-    let mut printed_lines: usize = 0;
-    let mut truncated = false;
-    let mut summary_buckets: std::collections::BTreeMap<String, u32> =
-        std::collections::BTreeMap::new();
-
-    // emit_header: paragraph/섹션 헤더. summary 모드에서는 출력 안 함, max_lines 초과 시 truncate.
-    macro_rules! emit_header {
-        ($($arg:tt)*) => {{
-            if !summary_mode {
-                let line = format!($($arg)*);
-                match max_lines {
-                    Some(limit) if printed_lines >= limit => {
-                        if !truncated {
-                            println!("... 이하 생략 (--max-lines {} 도달)", limit);
-                            truncated = true;
-                        }
-                    }
-                    _ => {
-                        println!("{}", line);
-                        printed_lines += 1;
+                match args.get(i) {
+                    Some(v) => out_path = Some(v.as_str()),
+                    None => {
+                        eprintln!("오류: -o 뒤에 출력 경로가 필요합니다.");
+                        return EXIT_USAGE;
                     }
                 }
             }
-        }};
-    }
-    // emit_diff: 차이 라인. summary 모드에서는 카테고리별 카운트, 일반 모드에서는 "  [차이] {}" 형식.
-    // 카테고리 추출: ":" 앞쪽 첫 토큰. controls[N].xxx 는 ".xxx" 만 추출.
-    macro_rules! emit_diff {
-        ($($arg:tt)*) => {{
-            let body = format!($($arg)*);
-            if summary_mode {
-                let prefix = body.split(':').next().unwrap_or(&body);
-                let cat = if let Some(pos) = prefix.rfind(']') {
-                    prefix[pos + 1..].trim_start_matches('.').trim().to_string()
-                } else {
-                    prefix.trim().to_string()
-                };
-                let key = if cat.is_empty() { body.clone() } else { cat };
-                *summary_buckets.entry(key).or_insert(0) += 1;
-            } else {
-                let line = format!("  [차이] {}", body);
-                match max_lines {
-                    Some(limit) if printed_lines >= limit => {
-                        if !truncated {
-                            println!("... 이하 생략 (--max-lines {} 도달)", limit);
-                            truncated = true;
-                        }
-                    }
-                    _ => {
-                        println!("{}", line);
-                        printed_lines += 1;
-                    }
-                }
+            other => {
+                eprintln!("오류: 알 수 없는 옵션입니다 - {}", other);
+                return EXIT_USAGE;
             }
-        }};
-    }
-
-    // 구역 수 비교
-    if doc_a.sections.len() != doc_b.sections.len() {
-        emit_diff!(
-            "구역 수: A={} vs B={}",
-            doc_a.sections.len(),
-            doc_b.sections.len()
-        );
-    }
-
-    let sec_count = doc_a.sections.len().min(doc_b.sections.len());
-    let mut total_diffs = 0u32;
-
-    for sec_idx in 0..sec_count {
-        if let Some(sf) = section_filter {
-            if sec_idx != sf {
-                continue;
-            }
-        }
-
-        let sec_a = &doc_a.sections[sec_idx];
-        let sec_b = &doc_b.sections[sec_idx];
-
-        if sec_a.paragraphs.len() != sec_b.paragraphs.len() {
-            emit_diff!(
-                "구역 {}: 문단 수 A={} vs B={}",
-                sec_idx,
-                sec_a.paragraphs.len(),
-                sec_b.paragraphs.len()
-            );
-            total_diffs += 1;
-        }
-
-        let para_count = sec_a.paragraphs.len().min(sec_b.paragraphs.len());
-        for pi in 0..para_count {
-            if let Some(pf) = para_filter {
-                if pi != pf {
-                    continue;
-                }
-            }
-
-            let pa = &sec_a.paragraphs[pi];
-            let pb = &sec_b.paragraphs[pi];
-            let mut diffs: Vec<String> = Vec::new();
-
-            // 텍스트 비교
-            if pa.text != pb.text {
-                diffs.push(format!(
-                    "text: A={:?} vs B={:?}",
-                    pa.text.chars().take(30).collect::<String>(),
-                    pb.text.chars().take(30).collect::<String>()
-                ));
-            }
-
-            // char_count 비교
-            if pa.char_count != pb.char_count {
-                diffs.push(format!("cc: A={} vs B={}", pa.char_count, pb.char_count));
-            }
-
-            // char_offsets 비교
-            if pa.char_offsets != pb.char_offsets {
-                let len_a = pa.char_offsets.len();
-                let len_b = pb.char_offsets.len();
-                if len_a != len_b {
-                    diffs.push(format!("char_offsets len: A={} vs B={}", len_a, len_b));
-                } else {
-                    let first_diff = pa
-                        .char_offsets
-                        .iter()
-                        .zip(pb.char_offsets.iter())
-                        .enumerate()
-                        .find(|(_, (a, b))| a != b);
-                    if let Some((idx, (a, b))) = first_diff {
-                        diffs.push(format!("char_offsets[{}]: A={} vs B={}", idx, a, b));
-                    }
-                }
-            }
-
-            // para_shape_id 비교
-            if pa.para_shape_id != pb.para_shape_id {
-                diffs.push(format!(
-                    "ps_id: A={} vs B={}",
-                    pa.para_shape_id, pb.para_shape_id
-                ));
-            }
-
-            // tab_extended 비교
-            if pa.tab_extended.len() != pb.tab_extended.len() {
-                diffs.push(format!(
-                    "tab_ext count: A={} vs B={}",
-                    pa.tab_extended.len(),
-                    pb.tab_extended.len()
-                ));
-            } else {
-                for (ti, (ta, tb)) in pa
-                    .tab_extended
-                    .iter()
-                    .zip(pb.tab_extended.iter())
-                    .enumerate()
-                {
-                    if tab_ext_semantic_differs(ta, tb) {
-                        diffs.push(format!("tab_ext[{}]: A={:?} vs B={:?}", ti, ta, tb));
-                        break;
-                    }
-                }
-            }
-
-            // LINE_SEG 비교
-            if pa.line_segs.len() != pb.line_segs.len() {
-                diffs.push(format!(
-                    "line_segs count: A={} vs B={}",
-                    pa.line_segs.len(),
-                    pb.line_segs.len()
-                ));
-            } else {
-                for (li, (la, lb)) in pa.line_segs.iter().zip(pb.line_segs.iter()).enumerate() {
-                    if la.text_start != lb.text_start {
-                        diffs.push(format!(
-                            "ls[{}].ts: A={} vs B={}",
-                            li, la.text_start, lb.text_start
-                        ));
-                    }
-                    if la.vertical_pos != lb.vertical_pos {
-                        diffs.push(format!(
-                            "ls[{}].vpos: A={} vs B={}",
-                            li, la.vertical_pos, lb.vertical_pos
-                        ));
-                    }
-                    if la.line_height != lb.line_height {
-                        diffs.push(format!(
-                            "ls[{}].lh: A={} vs B={}",
-                            li, la.line_height, lb.line_height
-                        ));
-                    }
-                    if la.text_height != lb.text_height {
-                        diffs.push(format!(
-                            "ls[{}].th: A={} vs B={}",
-                            li, la.text_height, lb.text_height
-                        ));
-                    }
-                    if la.baseline_distance != lb.baseline_distance {
-                        diffs.push(format!(
-                            "ls[{}].bl: A={} vs B={}",
-                            li, la.baseline_distance, lb.baseline_distance
-                        ));
-                    }
-                    if la.line_spacing != lb.line_spacing {
-                        diffs.push(format!(
-                            "ls[{}].ls: A={} vs B={}",
-                            li, la.line_spacing, lb.line_spacing
-                        ));
-                    }
-                    if la.column_start != lb.column_start {
-                        diffs.push(format!(
-                            "ls[{}].cs: A={} vs B={}",
-                            li, la.column_start, lb.column_start
-                        ));
-                    }
-                    if la.segment_width != lb.segment_width {
-                        diffs.push(format!(
-                            "ls[{}].sw: A={} vs B={}",
-                            li, la.segment_width, lb.segment_width
-                        ));
-                    }
-                }
-            }
-
-            // 컨트롤 식별 비교
-            if pa.controls.len() != pb.controls.len() {
-                diffs.push(format!(
-                    "controls count: A={} vs B={}",
-                    pa.controls.len(),
-                    pb.controls.len()
-                ));
-            }
-            {
-                use rhwp::model::control::Control;
-                let ctrl_count = pa.controls.len().min(pb.controls.len());
-                for ci in 0..ctrl_count {
-                    let ca = &pa.controls[ci];
-                    let cb = &pb.controls[ci];
-                    match (ca, cb) {
-                        (Control::Table(ta), Control::Table(tb)) => {
-                            diff_table(&mut diffs, ci, ta, tb);
-                        }
-                        (Control::Picture(pic_a), Control::Picture(pic_b)) => {
-                            diff_common_obj(&mut diffs, ci, "pic", &pic_a.common, &pic_b.common);
-                        }
-                        (Control::Shape(sa), Control::Shape(sb)) => {
-                            diff_common_obj(&mut diffs, ci, "shape", sa.common(), sb.common());
-                        }
-                        _ if control_tag(ca) != control_tag(cb) => {
-                            diffs.push(format!(
-                                "ctrl[{}] type: A={} vs B={}",
-                                ci,
-                                control_tag(ca),
-                                control_tag(cb)
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-
-            // char_shapes 비교
-            if pa.char_shapes.len() != pb.char_shapes.len() {
-                diffs.push(format!(
-                    "char_shapes count: A={} vs B={}",
-                    pa.char_shapes.len(),
-                    pb.char_shapes.len()
-                ));
-            } else {
-                for (ci, (ca, cb)) in pa.char_shapes.iter().zip(pb.char_shapes.iter()).enumerate() {
-                    if ca.start_pos != cb.start_pos {
-                        diffs.push(format!(
-                            "cs[{}].pos: A={} vs B={}",
-                            ci, ca.start_pos, cb.start_pos
-                        ));
-                        break;
-                    }
-                    if ca.char_shape_id != cb.char_shape_id {
-                        diffs.push(format!(
-                            "cs[{}].id: A={} vs B={}",
-                            ci, ca.char_shape_id, cb.char_shape_id
-                        ));
-                        break;
-                    }
-                }
-            }
-
-            if !diffs.is_empty() {
-                let text_preview: String = pa.text.chars().take(30).collect();
-                emit_header!("\n--- 문단 {}.{} --- \"{}\"", sec_idx, pi, text_preview);
-                for d in &diffs {
-                    emit_diff!("{}", d);
-                }
-                total_diffs += diffs.len() as u32;
-            }
-        }
-    }
-
-    // doc_info 비교: ParaShape
-    {
-        let ps_a = &doc_a.doc_info.para_shapes;
-        let ps_b = &doc_b.doc_info.para_shapes;
-        if ps_a.len() != ps_b.len() {
-            emit_diff!("ParaShape 수: A={} vs B={}", ps_a.len(), ps_b.len());
-            total_diffs += 1;
-        }
-        let ps_count = ps_a.len().min(ps_b.len());
-        for i in 0..ps_count {
-            let a = &ps_a[i];
-            let b = &ps_b[i];
-            let mut ps_diffs: Vec<String> = Vec::new();
-            if a.margin_left != b.margin_left {
-                ps_diffs.push(format!("ml: {}vs{}", a.margin_left, b.margin_left));
-            }
-            if a.margin_right != b.margin_right {
-                ps_diffs.push(format!("mr: {}vs{}", a.margin_right, b.margin_right));
-            }
-            if a.indent != b.indent {
-                ps_diffs.push(format!("indent: {}vs{}", a.indent, b.indent));
-            }
-            if a.tab_def_id != b.tab_def_id {
-                ps_diffs.push(format!("tab_def: {}vs{}", a.tab_def_id, b.tab_def_id));
-            }
-            if a.spacing_before != b.spacing_before {
-                ps_diffs.push(format!("sb: {}vs{}", a.spacing_before, b.spacing_before));
-            }
-            if a.spacing_after != b.spacing_after {
-                ps_diffs.push(format!("sa: {}vs{}", a.spacing_after, b.spacing_after));
-            }
-            if a.line_spacing != b.line_spacing {
-                ps_diffs.push(format!("ls: {}vs{}", a.line_spacing, b.line_spacing));
-            }
-            if !ps_diffs.is_empty() {
-                emit_diff!("PS[{}] {}", i, ps_diffs.join(", "));
-                total_diffs += ps_diffs.len() as u32;
-            }
-        }
-    }
-
-    // doc_info 비교: TabDef
-    {
-        let td_a = &doc_a.doc_info.tab_defs;
-        let td_b = &doc_b.doc_info.tab_defs;
-        if td_a.len() != td_b.len() {
-            emit_diff!("TabDef 수: A={} vs B={}", td_a.len(), td_b.len());
-            total_diffs += 1;
-        }
-        let td_count = td_a.len().min(td_b.len());
-        for i in 0..td_count {
-            let a = &td_a[i];
-            let b = &td_b[i];
-            if a.tabs.len() != b.tabs.len() {
-                emit_diff!("TD[{}] 탭 수: A={} vs B={}", i, a.tabs.len(), b.tabs.len());
-                total_diffs += 1;
-            } else {
-                for (ti, (ta, tb)) in a.tabs.iter().zip(b.tabs.iter()).enumerate() {
-                    if ta.position != tb.position
-                        || ta.tab_type != tb.tab_type
-                        || ta.fill_type != tb.fill_type
-                    {
-                        emit_diff!(
-                            "TD[{}][{}] pos: {}vs{}, type: {}vs{}, fill: {}vs{}",
-                            i,
-                            ti,
-                            ta.position,
-                            tb.position,
-                            ta.tab_type,
-                            tb.tab_type,
-                            ta.fill_type,
-                            tb.fill_type
-                        );
-                        total_diffs += 1;
-                    }
-                }
-            }
-        }
-    }
-
-    // [Task #653 보강] 요약 모드 출력 — 카테고리별 카운트 (내림차순 → 알파벳)
-    if summary_mode {
-        println!("=== 카테고리별 차이 요약 ===");
-        let mut entries: Vec<(String, u32)> = summary_buckets.into_iter().collect();
-        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
-        for (cat, count) in &entries {
-            println!("  {:>5}건  {}", count, cat);
-        }
-    }
-
-    println!("\n=== 비교 완료: 차이 {} 건 ===", total_diffs);
-}
-
-fn extract_thumbnail(args: &[String]) {
-    if args.is_empty() {
-        eprintln!("사용법: rhwp thumbnail <파일.hwp> [옵션]");
-        eprintln!("  -o, --output <파일>   출력 파일 경로");
-        eprintln!("  --base64              base64 문자열 출력");
-        eprintln!("  --data-uri            data:image/... URI 출력");
-        std::process::exit(1);
-    }
-
-    let input_path = &args[0];
-    let mut output_path: Option<String> = None;
-    let mut mode = "file"; // "file", "base64", "data-uri"
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "-o" | "--output" => {
-                i += 1;
-                if i < args.len() {
-                    output_path = Some(args[i].clone());
-                }
-            }
-            "--base64" => mode = "base64",
-            "--data-uri" => mode = "data-uri",
-            _ => {}
         }
         i += 1;
     }
 
-    let data = match fs::read(input_path) {
-        Ok(d) => d,
+    let payload = if bare {
+        // --bare 는 JSON Schema 검증기에 그대로 먹이는 본문이다 — 봉투 표지를 섞지 않는다.
+        rhwp::ir_schema::ir_schema()
+    } else {
+        // [#3885] "표지는 항상 실린다" — 문서를 열지 않는 명령의 봉투도
+        // untrustedContent:false 를 명시한다. 키 부재는 "안전"이 아니라
+        // "이 빌드는 표지를 모른다"로 읽히기 때문이다.
+        provenance::marked(rhwp::ir_schema::envelope(), "export-ir-schema")
+    };
+    let text = match serde_json::to_string_pretty(&payload) {
+        Ok(t) => t,
         Err(e) => {
-            eprintln!("오류: 파일을 읽을 수 없습니다: {} ({})", input_path, e);
-            std::process::exit(1);
+            eprintln!("오류: 스키마 직렬화 실패 - {}", e);
+            return EXIT_RUNTIME;
         }
     };
 
-    let result = match rhwp::parser::extract_thumbnail_only(&data) {
-        Some(r) => r,
+    if let Some(path) = out_path {
+        if let Err(e) = fs::write(path, text.as_bytes()) {
+            eprintln!("오류: 스키마를 쓸 수 없습니다 - {}: {}", path, e);
+            return EXIT_RUNTIME;
+        }
+        if json_mode {
+            // 파일로 뺐어도 stdout 은 기계 계약을 유지한다 — 어디에 썼는지 알려준다.
+            println!(
+                "{}",
+                provenance::marked(
+                    serde_json::json!({
+                        "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+                        "irSchemaVersion": rhwp::ir_schema::IR_SCHEMA_VERSION,
+                        "output": path,
+                        "bytes": text.len(),
+                    }),
+                    "export-ir-schema"
+                )
+            );
+        } else {
+            println!("IR 스키마 저장: {} ({} bytes)", path, text.len());
+        }
+        return EXIT_OK;
+    }
+
+    println!("{text}");
+    EXIT_OK
+}
+
+/// [#3719 §6-4] `export-plan-schema` — `run` 계획서 문법의 JSON Schema 를 낸다.
+///
+/// 문서를 입력으로 받지 않는다 — 스키마는 **계획서 문법의 자기서술**이지 특정 문서의
+/// 속성이 아니다. `run --json` 이 이미 쓴 계획을 검사한다면, 이 명령은 계획을 **쓰기
+/// 전에** 읽는 정답지다. 필드명을 지어내고 `invalid[]` 로 되돌아오는 왕복이 계획 생성
+/// 실패의 대부분이라, 그 왕복을 없애는 것이 목적이다.
+fn cmd_export_plan_schema(args: &[String]) -> i32 {
+    let mut out_path: Option<&str> = None;
+    let mut json_mode = false;
+    let mut bare = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json_mode = true,
+            // 봉투 없이 스키마 본문만 — JSON Schema 검증기에 바로 먹이려는 용도.
+            "--bare" => bare = true,
+            "-o" | "--out" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => out_path = Some(v.as_str()),
+                    None => {
+                        eprintln!("오류: -o 뒤에 출력 경로가 필요합니다.");
+                        return EXIT_USAGE;
+                    }
+                }
+            }
+            other => {
+                eprintln!("오류: 알 수 없는 옵션입니다 - {}", other);
+                return EXIT_USAGE;
+            }
+        }
+        i += 1;
+    }
+
+    let payload = if bare {
+        // --bare 는 JSON Schema 검증기에 그대로 먹이는 본문이다 — 봉투 표지를 섞지 않는다.
+        rhwp::plan_schema::plan_schema()
+    } else {
+        // [#3787 S1] "표지는 항상 실린다" — 문서를 열지 않는 명령의 봉투도
+        // untrustedContent:false 를 명시한다는 것이 capabilities 의 선언이다.
+        provenance::marked(rhwp::plan_schema::envelope(), "export-plan-schema")
+    };
+    let text = match serde_json::to_string_pretty(&payload) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("오류: 스키마 직렬화 실패 - {}", e);
+            return EXIT_RUNTIME;
+        }
+    };
+
+    if let Some(path) = out_path {
+        if let Err(e) = fs::write(path, text.as_bytes()) {
+            eprintln!("오류: 스키마를 쓸 수 없습니다 - {}: {}", path, e);
+            return EXIT_RUNTIME;
+        }
+        if json_mode {
+            // 파일로 뺐어도 stdout 은 기계 계약을 유지한다 — 어디에 썼는지 알려준다.
+            println!(
+                "{}",
+                provenance::marked(
+                    serde_json::json!({
+                        "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+                        "planSchemaVersion": rhwp::plan_schema::PLAN_SCHEMA_VERSION,
+                        "output": path,
+                        "bytes": text.len(),
+                    }),
+                    "export-plan-schema"
+                )
+            );
+        } else {
+            println!("계획 스키마 저장: {} ({} bytes)", path, text.len());
+        }
+        return EXIT_OK;
+    }
+
+    println!("{text}");
+    EXIT_OK
+}
+
+/// [#3776] `export-capabilities-schema` — capabilities 자체의 JSON Schema 를 낸다.
+fn cmd_export_capabilities_schema(args: &[String]) -> i32 {
+    let mut out_path: Option<&str> = None;
+    let mut json_mode = false;
+    let mut bare = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json_mode = true,
+            "--bare" => bare = true,
+            "-o" | "--out" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => out_path = Some(v.as_str()),
+                    None => {
+                        eprintln!("오류: -o 뒤에 출력 경로가 필요합니다.");
+                        return EXIT_USAGE;
+                    }
+                }
+            }
+            other => {
+                eprintln!("오류: 알 수 없는 옵션입니다 - {}", other);
+                return EXIT_USAGE;
+            }
+        }
+        i += 1;
+    }
+
+    let payload = if bare {
+        // --bare 는 JSON Schema 검증기에 그대로 먹이는 본문이다 — 봉투 표지를 섞지 않는다.
+        rhwp::capabilities_schema::capabilities_schema()
+    } else {
+        // [#3885] export-ir-schema 와 같은 사유 — 문서를 열지 않아도 표지는 싣는다.
+        provenance::marked(
+            rhwp::capabilities_schema::envelope(),
+            "export-capabilities-schema",
+        )
+    };
+    let text = match serde_json::to_string_pretty(&payload) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("오류: 스키마 직렬화 실패 - {}", e);
+            return EXIT_RUNTIME;
+        }
+    };
+
+    if let Some(path) = out_path {
+        if let Err(e) = fs::write(path, text.as_bytes()) {
+            eprintln!("오류: 스키마를 쓸 수 없습니다 - {}: {}", path, e);
+            return EXIT_RUNTIME;
+        }
+        if json_mode {
+            println!(
+                "{}",
+                provenance::marked(
+                    serde_json::json!({
+                        "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+                        "capabilitiesSchemaVersion":
+                            rhwp::capabilities_schema::CAPABILITIES_SCHEMA_VERSION,
+                        "output": path,
+                        "bytes": text.len(),
+                    }),
+                    "export-capabilities-schema"
+                )
+            );
+        } else {
+            println!("capabilities 스키마 저장: {} ({} bytes)", path, text.len());
+        }
+        return EXIT_OK;
+    }
+
+    println!("{text}");
+    EXIT_OK
+}
+
+/// [#3907 O1] `export-ontology` — 자기서술에서 JSON-LD 온톨로지를 기계 유도한다.
+///
+/// 문서를 입력으로 받지 않는다 — 온톨로지는 rhwp 라는 **도구 자신**(IR 타입·명령
+/// 표면·신뢰 경계)의 서술이지 특정 문서의 속성이 아니다. 유도 원천은 전부 같은
+/// 크레이트의 단일 출처 함수다: `ir_schema()`·`cli::metadata::capabilities::capabilities_value()`·
+/// `cli::metadata::mcp::mcp_tool_definitions()`·`provenance::MAP`. 손 나열 상수가 없으므로 원천이
+/// 바뀌면 온톨로지가 함께 바뀐다 — 드리프트 구조적 불가능이 이 명령의 논지다.
+/// 문서 인스턴스 모드(O2)는 후속이다.
+fn cmd_export_ontology(args: &[String]) -> i32 {
+    let mut out_path: Option<&str> = None;
+    let mut json_mode = false;
+    let mut bare = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--json" => json_mode = true,
+            // 봉투 없이 JSON-LD 본문만 — RDF/JSON-LD 도구에 바로 먹이려는 용도.
+            "--bare" => bare = true,
+            "-o" | "--out" => {
+                i += 1;
+                match args.get(i) {
+                    Some(v) => out_path = Some(v.as_str()),
+                    None => {
+                        eprintln!("오류: -o 뒤에 출력 경로가 필요합니다.");
+                        return EXIT_USAGE;
+                    }
+                }
+            }
+            other => {
+                eprintln!("오류: 알 수 없는 옵션입니다 - {}", other);
+                return EXIT_USAGE;
+            }
+        }
+        i += 1;
+    }
+
+    let caps = cli::metadata::capabilities::capabilities_value();
+    let tools = cli::metadata::mcp::mcp_tool_definitions();
+    let payload = if bare {
+        // --bare 는 JSON-LD 처리기에 그대로 먹이는 본문이다 — 봉투 표지를 섞지 않는다.
+        rhwp::ontology::ontology(&caps, &tools)
+    } else {
+        // [#3885] "표지는 항상 실린다" — 문서를 열지 않는 명령의 봉투도
+        // untrustedContent:false 를 명시한다.
+        provenance::marked(rhwp::ontology::envelope(&caps, &tools), "export-ontology")
+    };
+    let text = match serde_json::to_string_pretty(&payload) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("오류: 온톨로지 직렬화 실패 - {}", e);
+            return EXIT_RUNTIME;
+        }
+    };
+
+    if let Some(path) = out_path {
+        if let Err(e) = fs::write(path, text.as_bytes()) {
+            eprintln!("오류: 온톨로지를 쓸 수 없습니다 - {}: {}", path, e);
+            return EXIT_RUNTIME;
+        }
+        if json_mode {
+            // 파일로 뺐어도 stdout 은 기계 계약을 유지한다 — 어디에 썼는지 알려준다.
+            println!(
+                "{}",
+                provenance::marked(
+                    serde_json::json!({
+                        "schemaVersion": ENVELOPE_SCHEMA_VERSION,
+                        "ontologyVersion": rhwp::ontology::ONTOLOGY_VERSION,
+                        "output": path,
+                        "bytes": text.len(),
+                    }),
+                    "export-ontology"
+                )
+            );
+        } else {
+            println!("온톨로지 저장: {} ({} bytes)", path, text.len());
+        }
+        return EXIT_OK;
+    }
+
+    println!("{text}");
+    EXIT_OK
+}
+
+/// [#3828 B2] `export-agent-manifest` 조립 코어 — capabilities·irSchema·provenanceMap·
+/// planSchema 를 왕복 1회로 묶는다.
+///
+/// 각 서브필드는 해당 명령의 기존 산출 함수를 그대로 불러 조립만 한다 — 스키마·지도
+/// 로직을 여기서 다시 만들지 않는다. `missingAxes` 는 네 축이 모두 실린 지금 빈
+/// 배열이지만 필드 자체는 남긴다 — 앞으로 축이 늘 때 "아직 없는 축"을 이 배열로
+/// 알리는 것이 B2 의 계약이고, null 로 채우면 "값이 비었다"와 "명령이 아직 없다"를
+/// 소비자가 구분할 수 없다.
+fn agent_manifest_value(bare: bool) -> serde_json::Value {
+    let mut fields = serde_json::Map::new();
+    fields.insert(
+        "capabilities".to_string(),
+        provenance::marked(
+            cli::metadata::capabilities::capabilities_value(),
+            "capabilities",
+        ),
+    );
+    fields.insert("irSchema".to_string(), rhwp::ir_schema::ir_schema());
+    fields.insert(
+        "provenanceMap".to_string(),
+        provenance::marked(
+            provenance::map_json(&rhwp::version()),
+            "export-provenance-map",
+        ),
+    );
+    // [#3808] planSchema 축 — irSchema 처럼 bare 본문을 싣는다. 본문이 `$id`·
+    // `planSchemaVersion` 을 자체 내장하므로 봉투 메타를 중복하지 않는다.
+    fields.insert("planSchema".to_string(), rhwp::plan_schema::plan_schema());
+    fields.insert("missingAxes".to_string(), serde_json::json!([]));
+
+    if bare {
+        return serde_json::Value::Object(fields);
+    }
+    let mut envelope = serde_json::Map::new();
+    envelope.insert(
+        "schemaVersion".to_string(),
+        serde_json::json!(ENVELOPE_SCHEMA_VERSION),
+    );
+    envelope.extend(fields);
+    serde_json::Value::Object(envelope)
+}
+
+/// [#3828 B2] `export-agent-manifest` — 처음 붙는 에이전트가 capabilities →
+/// export-ir-schema → export-provenance-map → export-plan-schema 를 각각 따로
+/// 호출하던 왕복 4회를 1회로 줄인다.
+fn cmd_export_agent_manifest(args: &[String]) -> i32 {
+    let mut json_mode = false;
+    let mut bare = false;
+    for arg in args {
+        match arg.as_str() {
+            "--json" => json_mode = true,
+            "--bare" => bare = true,
+            other => {
+                eprintln!("알 수 없는 옵션: {other}");
+                return EXIT_USAGE;
+            }
+        }
+    }
+
+    let manifest = provenance::marked(agent_manifest_value(bare), "export-agent-manifest");
+
+    if json_mode {
+        let text = match serde_json::to_string_pretty(&manifest) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("오류: 매니페스트 직렬화 실패 - {}", e);
+                return EXIT_RUNTIME;
+            }
+        };
+        println!("{text}");
+        return EXIT_OK;
+    }
+
+    println!("rhwp 에이전트 매니페스트 (capabilities + irSchema + provenanceMap 조립)");
+    println!();
+    println!("  capabilities     포함");
+    println!("  irSchema         포함");
+    println!("  provenanceMap    포함");
+    println!("  planSchema       포함");
+    println!();
+    println!("기계 계약은 --json 을 쓰세요 (--bare 로 최상위 표지 없이).");
+    EXIT_OK
+}
+
+/// [#3787 S2] `tool_directive` 판정에 쓰는 **도구 이름 등록부**.
+///
+/// 이름을 탐지 모듈에 하드코딩하지 않는다. 도구가 늘어도 목록이 따라오지 않으면
+/// 새 도구를 부르는 주입문이 조용히 통과하기 때문이다. 원천은 이 저장소가 이미
+/// 가진 두 등록부다 — 무상태 도구는 `cli::metadata::mcp::mcp_tool_definitions()`(= `capabilities --mcp`
+/// 의 stdout), 세션 도구는 `agent_profiles::ALL_SESSION_TOOLS`(= `mcp-serve` 가 여는
+/// 집합). 둘 중 어디에 도구를 더해도 탐지가 함께 자란다.
+fn mcp_tool_name_registry() -> Vec<String> {
+    let mut names: Vec<String> = cli::metadata::mcp::mcp_tool_definitions()
+        .iter()
+        .filter_map(|t| t["name"].as_str().map(String::from))
+        .collect();
+    names.extend(
+        agent_profiles::ALL_SESSION_TOOLS
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// `inspect` — 문서를 **읽기만** 하는 보안 검사 명령군.
+///
+/// `hidden-text`·`injection`·`unicode`는 각각 조판 은닉, 문장형 지시, 화면과 바이트의
+/// 불일치를 판정한다. 어느 축도 문서를 고치지 않는다.
+fn inspect_command(args: &[String]) -> i32 {
+    const USAGE: &str =
+        "사용법: rhwp inspect <hidden-text|injection|unicode|watermark> <파일.hwp|파일.hwpx> [각 축 옵션]";
+
+    match args.first().map(|s| s.as_str()) {
+        Some("hidden-text") => cli::queries::security_inspection::inspect_hidden_text(&args[1..]),
+        Some("injection") => cli::queries::security_inspection::inspect_injection(&args[1..]),
+        Some("unicode") => cli::queries::security_inspection::inspect_unicode(&args[1..]),
+        Some("watermark") => cli::queries::security_inspection::inspect_watermark(&args[1..]),
+        Some(other) => {
+            eprintln!("오류: 알 수 없는 inspect 하위 명령입니다 - {other}");
+            let hint = cli::metadata::capabilities::closest_name(
+                other,
+                ["hidden-text", "injection", "unicode", "watermark"],
+            );
+            if let Some(hint) = &hint {
+                eprintln!("혹시 이것인가요? inspect {hint}");
+            }
+            eprintln!("{USAGE}");
+            // [#4220 T4] 확신 교정(#3694 임계 내)일 때만 정형 수복 줄 — 임계 밖은 침묵.
+            if let Some(hint) = hint {
+                cli::metadata::capabilities::eprint_usage_recovery(
+                    "inspect",
+                    Some(&hint),
+                    "요청한 이름이 없음 — 가장 가까운 실존 하위 명령으로 교정",
+                );
+            }
+            EXIT_USAGE
+        }
         None => {
-            eprintln!("오류: PrvImage 썸네일이 없습니다: {}", input_path);
-            std::process::exit(1);
-        }
-    };
-
-    let mime = match result.format.as_str() {
-        "png" => "image/png",
-        "bmp" => "image/bmp",
-        "gif" => "image/gif",
-        _ => "application/octet-stream",
-    };
-
-    match mode {
-        "base64" => {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&result.data);
-            println!("{}", b64);
-        }
-        "data-uri" => {
-            use base64::Engine;
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&result.data);
-            println!("data:{};base64,{}", mime, b64);
-        }
-        _ => {
-            // 파일 출력
-            let out = output_path.unwrap_or_else(|| {
-                let stem = Path::new(input_path)
-                    .file_stem()
-                    .unwrap_or_default()
-                    .to_string_lossy();
-                let ext = &result.format;
-                format!("output/{}_thumb.{}", stem, ext)
-            });
-
-            // 출력 디렉토리 생성
-            if let Some(parent) = Path::new(&out).parent() {
-                if !parent.exists() {
-                    fs::create_dir_all(parent).ok();
-                }
-            }
-
-            match fs::write(&out, &result.data) {
-                Ok(_) => {
-                    println!(
-                        "썸네일 추출 완료: {} ({}x{}, {} bytes, {})",
-                        out,
-                        result.width,
-                        result.height,
-                        result.data.len(),
-                        result.format
-                    );
-                }
-                Err(e) => {
-                    eprintln!("오류: 파일 저장 실패: {} ({})", out, e);
-                    std::process::exit(1);
-                }
-            }
+            // [#4220 T4] 하위 명령 누락은 어느 축을 원했는지 결정론적으로 알 수 없다 —
+            // 수복 줄을 지어내지 않는다(오제안 0).
+            eprintln!(
+                "오류: inspect 하위 명령을 지정해주세요 (hidden-text|injection|unicode|watermark)."
+            );
+            eprintln!("{USAGE}");
+            EXIT_USAGE
         }
     }
 }
 
+/// 현재 스캔이 실제로 훑는 영역 이름 — 봉투와 사람 출력이 같은 목록을 쓴다.
+fn injection_scan_scopes(include_fields: bool) -> Vec<&'static str> {
+    let mut scopes = vec![
+        "body",
+        "tableCell",
+        "textBox",
+        "equation",
+        "footnote",
+        "endnote",
+        "header",
+        "footer",
+        "caption",
+    ];
+    if include_fields {
+        scopes.extend([
+            "fieldName",
+            "fieldGuide",
+            "fieldCommand",
+            "hiddenComment",
+            "fieldMemo",
+        ]);
+    }
+    scopes
+}
+
+/// 터미널로 나가는 발췌의 제어문자를 보이는 기호로 바꾼다.
+///
+/// 문서 텍스트는 고치지 않는다 — 여기서 바뀌는 것은 **화면 표시**뿐이다(`--json` 봉투는
+/// serde 가 `\u001b` 로 이스케이프하므로 손대지 않는다). 주입 문서가 ANSI 이스케이프를
+/// 함께 심으면 경고 줄 자체를 지우거나 색으로 덮어 사람을 속일 수 있다.
+fn display_safe(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '\u{1b}' => '␛',
+            '\n' | '\r' => '⏎',
+            '\t' => '⇥',
+            c if (c as u32) < 0x20 => '␀',
+            c => c,
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::tab_ext_semantic_differs;
+    use crate::cli::outputs::allows_implicit_sibling_resources;
+    use crate::cli::protocol::{
+        collect_audit_capsules, replay_scratch_dir, with_replay_input_snapshot,
+    };
+
+    use super::{
+        cli_output_password, cli_password, set_cli_output_password, set_cli_password,
+        strip_global_auth_options, strip_utf8_bom, EXIT_USAGE,
+    };
+    use rhwp::parser::FileFormat;
 
     #[test]
-    fn tab_ext_reserved_fields_ignored() {
-        // 같은 문서의 HWPX(파서가 [1],[3..6]=0) vs HWP5([1]=leader/fill 슬롯, [3..6]=원본 바이트).
-        // 이 포맷 비대칭 슬롯들은 모두 무시 → 의미 차이 없음.
-        let hwpx = [1640, 0, 256, 0, 0, 0, 9];
-        let hwp5 = [1640, 5, 256, 32, 32, 32, 9];
-        assert!(!tab_ext_semantic_differs(&hwpx, &hwp5));
+    fn hml_does_not_implicitly_load_sibling_resources() {
+        assert!(!allows_implicit_sibling_resources(FileFormat::Hml));
+        assert!(allows_implicit_sibling_resources(FileFormat::Hwp));
+        assert!(allows_implicit_sibling_resources(FileFormat::Hwpx));
     }
 
     #[test]
-    fn tab_ext_semantic_fields_detected() {
-        let base = [1640, 0, 256, 0, 0, 0, 9];
-        assert!(!tab_ext_semantic_differs(&base, &base));
-        // width([0]) 차이 검출
-        assert!(tab_ext_semantic_differs(&base, &[1641, 0, 256, 0, 0, 0, 9]));
-        // type([2] high byte) 차이 검출 — 256(0x0100)→512(0x0200)
-        assert!(tab_ext_semantic_differs(&base, &[1640, 0, 512, 0, 0, 0, 9]));
-        // leader([2] low byte, 두 포맷 공통) 차이 검출 — 256(0x0100)→257(0x0101)
-        assert!(tab_ext_semantic_differs(&base, &[1640, 0, 257, 0, 0, 0, 9]));
-        // HWP5 leader/fill 슬롯([1], HWPX는 항상 0)은 포맷 비대칭이라 무시 — 차이로 치지 않음
-        assert!(!tab_ext_semantic_differs(
-            &base,
-            &[1640, 1, 256, 0, 0, 0, 9]
+    fn replay_engine_receives_the_hashed_input_snapshot() {
+        let original =
+            std::env::temp_dir().join(format!("rhwp-replay-original-{}.hwp", std::process::id()));
+        std::fs::write(&original, b"original bytes").expect("원본 작성");
+        let mut plan = serde_json::json!({ "input": original.to_string_lossy() });
+        let scratch = replay_scratch_dir("unit").expect("전용 임시 폴더");
+        let scratch_path = scratch.0.clone();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(&scratch_path)
+                    .expect("전용 임시 폴더 metadata")
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                0o700
+            );
+        }
+        let seen = with_replay_input_snapshot(
+            &mut plan,
+            b"hashed snapshot",
+            &scratch.0,
+            |snapshot_plan| {
+                std::fs::write(&original, b"changed after hashing").expect("원본 교체");
+                let snapshot_path = snapshot_plan["input"].as_str().expect("스냅샷 경로");
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(
+                        std::fs::metadata(snapshot_path)
+                            .expect("입력 스냅샷 metadata")
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o600
+                    );
+                }
+                std::fs::read(snapshot_path).expect("스냅샷 읽기")
+            },
+        )
+        .expect("스냅샷 실행");
+        assert_eq!(seen, b"hashed snapshot");
+        assert_eq!(plan["input"], original.to_string_lossy().as_ref());
+        drop(scratch);
+        assert!(!scratch_path.exists(), "전용 임시 폴더는 RAII 정리");
+        let _ = std::fs::remove_file(original);
+    }
+
+    #[test]
+    fn audit_directory_entry_errors_are_not_silently_dropped() {
+        let entries: [std::io::Result<std::path::PathBuf>; 1] = [Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "denied",
+        ))];
+        let error = collect_audit_capsules(entries).expect_err("항목 오류는 fail-closed");
+        assert!(error.contains("폴더 항목 읽기 실패"));
+    }
+
+    #[test]
+    fn global_password_option_is_removed_from_any_position() {
+        let args = vec![
+            "rhwp".to_string(),
+            "info".to_string(),
+            "sample.hwp".to_string(),
+            "--password".to_string(),
+            "secret".to_string(),
+        ];
+        set_cli_password(None);
+        let clean = strip_global_auth_options(args).unwrap();
+        assert_eq!(clean, ["rhwp", "info", "sample.hwp"]);
+        // 비밀번호는 반환값이 아니라 CLI_PASSWORD(thread_local)로 전달된다.
+        assert_eq!(cli_password().as_deref(), Some("secret"));
+        set_cli_password(None);
+    }
+
+    #[test]
+    fn password_stdin_ignores_only_a_leading_utf8_bom() {
+        assert_eq!(strip_utf8_bom("\u{feff}123456\n"), "123456\n");
+        assert_eq!(strip_utf8_bom("123456\n"), "123456\n");
+        assert_eq!(
+            strip_utf8_bom("123456\n\u{feff}next"),
+            "123456\n\u{feff}next"
+        );
+    }
+
+    #[test]
+    fn duplicate_global_password_options_are_rejected() {
+        let args = vec![
+            "rhwp".to_string(),
+            "--password".to_string(),
+            "first".to_string(),
+            "info".to_string(),
+            "sample.hwp".to_string(),
+            "--password".to_string(),
+            "second".to_string(),
+        ];
+        assert!(matches!(
+            strip_global_auth_options(args),
+            Err(code) if code == EXIT_USAGE
         ));
-        // marker([6]) 차이 검출
-        assert!(tab_ext_semantic_differs(&base, &[1640, 0, 256, 0, 0, 0, 0]));
+    }
+
+    #[test]
+    fn global_output_password_is_removed_without_leaking_into_command_args() {
+        let args = vec![
+            "rhwp".to_string(),
+            "convert".to_string(),
+            "source.hwp".to_string(),
+            "output.hwp".to_string(),
+            "--output-password".to_string(),
+            "protected".to_string(),
+        ];
+        set_cli_password(None);
+        set_cli_output_password(None);
+        let clean = strip_global_auth_options(args).unwrap();
+        assert_eq!(clean, ["rhwp", "convert", "source.hwp", "output.hwp"]);
+        assert_eq!(cli_output_password().as_deref(), Some("protected"));
+        set_cli_output_password(None);
+    }
+
+    #[test]
+    fn duplicate_global_output_password_options_are_rejected() {
+        let args = vec![
+            "rhwp".to_string(),
+            "--output-password".to_string(),
+            "first".to_string(),
+            "convert".to_string(),
+            "source.hwp".to_string(),
+            "output.hwp".to_string(),
+            "--output-password".to_string(),
+            "second".to_string(),
+        ];
+        assert!(matches!(
+            strip_global_auth_options(args),
+            Err(code) if code == EXIT_USAGE
+        ));
     }
 }

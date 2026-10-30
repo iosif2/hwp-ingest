@@ -63,12 +63,15 @@ fn test_serialize_hwp_cfb_streams() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
         extra_streams: Vec::new(),
         hwpx_aux_entries: Vec::new(),
         is_hwp3_variant: false,
+        is_hwpx_variant: false,
+        provenance: Default::default(),
     };
 
     let bytes = serialize_hwp(&doc).unwrap();
@@ -112,6 +115,8 @@ fn test_serialize_hwp_compressed() {
         extra_streams: Vec::new(),
         hwpx_aux_entries: Vec::new(),
         is_hwp3_variant: false,
+        is_hwpx_variant: false,
+        provenance: Default::default(),
     };
 
     let bytes = serialize_hwp(&doc).unwrap();
@@ -132,6 +137,9 @@ fn test_full_roundtrip_uncompressed() {
         raw_data: None,
         name: "함초롬바탕".to_string(),
         alt_type: 0,
+        is_embedded: false,
+        bin_item_id_ref: String::new(),
+        resolved_bin_data_id: None,
         alt_name: None,
         type_info: None,
         default_name: None,
@@ -203,12 +211,15 @@ fn test_full_roundtrip_uncompressed() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
         extra_streams: Vec::new(),
         hwpx_aux_entries: Vec::new(),
         is_hwp3_variant: false,
+        is_hwpx_variant: false,
+        provenance: Default::default(),
     };
 
     // Document → HWP bytes
@@ -281,12 +292,15 @@ fn test_full_roundtrip_compressed() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: Vec::new(),
         extra_streams: Vec::new(),
         hwpx_aux_entries: Vec::new(),
         is_hwp3_variant: false,
+        is_hwpx_variant: false,
+        provenance: Default::default(),
     };
 
     // Document → HWP bytes (compressed)
@@ -1550,7 +1564,7 @@ fn write_hwp_with_cfb_crate(orig_data: &[u8]) -> Vec<u8> {
 
     let mut section_data_list = Vec::new();
     for section in &doc.sections {
-        let section_bytes = super::serialize_section(section);
+        let section_bytes = crate::serializer::body_text::serialize_section(section);
         let section_data = if compressed {
             super::compress_stream(&section_bytes).unwrap()
         } else {
@@ -1668,16 +1682,19 @@ fn test_ole_storage_size_prefix_restored() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: vec![BinDataContent {
             id: 1,
-            data: ole_cfb.clone(),
+            data: ole_cfb.clone().into(),
             extension: "OLE".to_string(),
         }],
         extra_streams: Vec::new(),
         hwpx_aux_entries: Vec::new(),
         is_hwp3_variant: false,
+        is_hwpx_variant: false,
+        provenance: Default::default(),
     };
 
     let bytes = serialize_hwp(&doc).unwrap();
@@ -1753,16 +1770,19 @@ fn test_compressed_ole_storage_payload_is_deflated() {
                 ..Default::default()
             }],
             raw_stream: None,
+            raw_provenance: None,
         }],
         preview: None,
         bin_data_content: vec![BinDataContent {
             id: 1,
-            data: ole_cfb.clone(),
+            data: ole_cfb.clone().into(),
             extension: "OLE".to_string(),
         }],
         extra_streams: Vec::new(),
         hwpx_aux_entries: Vec::new(),
         is_hwp3_variant: false,
+        is_hwpx_variant: false,
+        provenance: Default::default(),
     };
 
     let bytes = serialize_hwp(&doc).unwrap();
