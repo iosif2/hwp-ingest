@@ -11,6 +11,22 @@ fn test_create_empty_document() {
     assert_eq!(doc.page_count(), 1);
 }
 
+#[test]
+fn render_page_svg_native_with_compat_returns_svg_for_empty_document() {
+    let doc = HwpDocument::create_empty();
+    let svg = doc
+        .render_page_svg_native_with_compat(
+            0,
+            crate::renderer::compat::RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY,
+        )
+        .expect("compat SVG render should succeed for an empty document");
+
+    assert!(
+        svg.contains("<svg"),
+        "SVG output should contain <svg: {svg}"
+    );
+}
+
 /// [#1386] createEmpty는 구역 1개 + 빈 문단 1개를 포함해 생성 직후
 /// 편집/조회/내보내기가 가능해야 한다 (구역 0개 → 모든 API 실패 회귀 방지).
 #[test]

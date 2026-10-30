@@ -266,6 +266,7 @@ fn stored_layout_relocated_empty_rowbreak_picture_resets_offset(
     relocated_page_ladder || same_page_stale_hwp5_picture
 }
 
+use super::super::compat::should_clamp_non_overlay_body_table_to_flow;
 use super::super::composer::effective_text_for_metrics;
 use super::super::{hwpunit_to_px, ShapeStyle};
 use super::border_rendering::{
@@ -2717,6 +2718,13 @@ impl LayoutEngine {
     ) -> f64 {
         // [#6929] 진입 시점의 단 상태 — 이후 이 함수가 자식을 붙이므로 먼저 찍어 둔다.
         let column_is_empty_on_entry = col_node.children.is_empty();
+        let body_flow_context = depth == 0
+            && table_meta.is_some()
+            && !matches!(
+                col_node.node_type,
+                RenderNodeType::Header | RenderNodeType::Footer | RenderNodeType::MasterPage
+            )
+            && self.is_body_flow_col_area(col_area);
         if table.cells.is_empty() {
             if depth == 0 {
                 return y_start;
@@ -2810,6 +2818,7 @@ impl LayoutEngine {
                                 outer_host_stored_vpos_hu,
                                 allow_para_top_bleed,
                                 column_is_empty_on_entry,
+                                body_flow_context,
                             )
                         } else {
                             y_start
@@ -3318,6 +3327,7 @@ impl LayoutEngine {
                 outer_host_stored_vpos_hu,
                 allow_para_top_bleed,
                 column_is_empty_on_entry,
+                body_flow_context,
             );
             if depth > 0 && render_caption {
                 computed_y + top_caption_flow_extra(&table.caption, caption_height, caption_spacing)
@@ -5430,6 +5440,7 @@ impl LayoutEngine {
         // [#6929] 이 단(column)에 아직 아무것도 안 놓였나 — 공동 앵커 형제 쌓임과
         // 앵커 자신의 줄 예약을 가른다.
         column_is_empty: bool,
+        body_flow_context: bool,
     ) -> f64 {
         let table_treat_as_char = table.common.treat_as_char;
         let table_text_wrap = if depth == 0 {
@@ -5437,6 +5448,12 @@ impl LayoutEngine {
         } else {
             crate::model::shape::TextWrap::Square
         };
+        let compat_clamps_body_table = should_clamp_non_overlay_body_table_to_flow(
+            self.render_compatibility_options.get(),
+            &table.common,
+            depth,
+            body_flow_context,
+        );
 
         if depth == 0
             && !table_treat_as_char
@@ -5739,6 +5756,10 @@ impl LayoutEngine {
                         clamped
                     }
                 }
+            } else if compat_clamps_body_table
+                && matches!(table_text_wrap, crate::model::shape::TextWrap::TopAndBottom)
+            {
+                raw_y.max(y_start)
             } else {
                 raw_y
             }

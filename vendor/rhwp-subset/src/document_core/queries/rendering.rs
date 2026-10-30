@@ -1467,6 +1467,26 @@ impl DocumentCore {
         self.layout_engine.take_table_overlaps()
     }
 
+    pub fn render_page_svg_native_with_compat(
+        &self,
+        page_num: u32,
+        options: crate::renderer::compat::RenderCompatibilityOptions,
+    ) -> Result<String, HwpError> {
+        let previous = self.layout_engine.render_compatibility_options();
+        let options_changed = options != previous;
+        if options_changed {
+            self.invalidate_page_tree_cache();
+        }
+        self.layout_engine.set_render_compatibility_options(options);
+        let result = self.render_page_svg_native(page_num);
+        self.layout_engine
+            .set_render_compatibility_options(previous);
+        if options_changed {
+            self.invalidate_page_tree_cache();
+        }
+        result
+    }
+
     /// Production SVG entry point. Screen-profile paint decisions are built once in
     /// `PageLayerTree` and replayed by the SVG backend, matching the Studio renderer boundary.
     pub fn render_page_svg_native(&self, page_num: u32) -> Result<String, HwpError> {

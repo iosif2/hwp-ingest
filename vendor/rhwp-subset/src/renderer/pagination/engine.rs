@@ -2337,15 +2337,16 @@ impl Paginator {
 
             // 강제 줄넘김 후 TAC 표: 텍스트가 표 앞에 있음 (Task #19)
             let has_forced_linebreak = is_tac_table && para.text.contains('\n');
-            let pre_table_end_line = if vertical_offset > 0 && !para.text.is_empty() {
-                total_lines
-            } else if has_forced_linebreak && total_lines > 1 {
-                // 강제 줄넘김 전 텍스트 줄 수 = \n 개수
-                let newline_count = para.text.chars().filter(|&c| c == '\n').count();
-                newline_count.min(total_lines - 1)
-            } else {
-                0
-            };
+            let pre_table_end_line =
+                if !is_tac_table && vertical_offset > 0 && !para.text.is_empty() {
+                    total_lines
+                } else if has_forced_linebreak && total_lines > 1 {
+                    // 강제 줄넘김 전 텍스트 줄 수 = \n 개수
+                    let newline_count = para.text.chars().filter(|&c| c == '\n').count();
+                    newline_count.min(total_lines - 1)
+                } else {
+                    0
+                };
 
             // 표 앞 텍스트 배치 (첫 번째 표에서만, 중복 방지)
             // 어울림 표는 wrap 영역에서 텍스트 처리하므로 건너뜀

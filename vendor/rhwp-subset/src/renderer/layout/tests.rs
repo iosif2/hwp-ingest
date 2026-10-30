@@ -1394,6 +1394,807 @@ fn test_layout_table_basic() {
 }
 
 #[test]
+fn hancom_render_compat_clamps_non_overlay_body_table_to_flow_anchor() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertAlign, VertRelTo};
+    use crate::model::table::{Cell, Table};
+    use crate::renderer::compat::RenderCompatibilityOptions;
+
+    let engine = LayoutEngine::with_default_dpi();
+    engine
+        .set_render_compatibility_options(RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY);
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+
+    let mut common = CommonObjAttr::default();
+    common.treat_as_char = false;
+    common.text_wrap = TextWrap::TopAndBottom;
+    common.vert_rel_to = VertRelTo::Paper;
+    common.vert_align = VertAlign::Top;
+    common.vertical_offset = 0;
+    common.width = 6000;
+    common.height = 1200;
+
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        common,
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 6000,
+            height: 1200,
+            paragraphs: vec![Paragraph::default()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let paragraphs = vec![Paragraph {
+        controls: vec![Control::Table(Box::new(table))],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let styles = ResolvedStyleSet::default();
+    let body_area_y = layout.body_area.y;
+
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        page_number_restarted: false,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![PageItem::Table {
+                para_index: 0,
+                control_index: 0,
+            }],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+            overlay_continuations: Vec::new(),
+            overlay_cuts: Vec::new(),
+            inline_placements: Default::default(),
+            inline_flow_plans: Default::default(),
+            paragraph_float_placements: Default::default(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+        ladder_band_tables: Vec::new(),
+    };
+
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &styles,
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+
+    let body = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body node should exist");
+    let col = body
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Column(_)))
+        .expect("body column should exist");
+    let table_node = col
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Table(_)))
+        .expect("compat-clamped table should remain under the body column");
+
+    assert!(
+        table_node.bbox.y >= body_area_y,
+        "compat-clamped table y={} must not render above body flow anchor {}",
+        table_node.bbox.y,
+        body_area_y
+    );
+}
+
+#[test]
+fn hancom_render_compat_stacks_empty_anchor_non_tac_table_after_tac_table() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+    use crate::model::table::{Cell, Table};
+    use crate::renderer::compat::RenderCompatibilityOptions;
+
+    fn single_cell_table(mut common: CommonObjAttr) -> Table {
+        common.width = 6000;
+        common.height = 1200;
+        Table {
+            row_count: 1,
+            col_count: 1,
+            row_sizes: vec![1],
+            common,
+            cells: vec![Cell {
+                col: 0,
+                row: 0,
+                col_span: 1,
+                row_span: 1,
+                width: 6000,
+                height: 1200,
+                paragraphs: vec![Paragraph::default()],
+                ..Default::default()
+            }],
+            ..Default::default()
+        }
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    engine
+        .set_render_compatibility_options(RenderCompatibilityOptions::HANCOM_RENDER_COMPATIBILITY);
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+
+    let mut tac_common = CommonObjAttr::default();
+    tac_common.treat_as_char = true;
+    tac_common.text_wrap = TextWrap::TopAndBottom;
+    tac_common.vert_rel_to = VertRelTo::Para;
+    tac_common.height = 4200;
+    let tac_table = single_cell_table(tac_common);
+
+    let mut non_tac_common = CommonObjAttr::default();
+    non_tac_common.treat_as_char = false;
+    non_tac_common.text_wrap = TextWrap::TopAndBottom;
+    non_tac_common.vert_rel_to = VertRelTo::Para;
+    non_tac_common.vertical_offset = 0;
+    let non_tac_table = single_cell_table(non_tac_common);
+
+    let paragraphs = vec![Paragraph {
+        controls: vec![
+            Control::Table(Box::new(tac_table)),
+            Control::Table(Box::new(non_tac_table)),
+        ],
+        line_segs: vec![LineSeg {
+            line_height: 1200,
+            text_height: 1200,
+            baseline_distance: 1000,
+            line_spacing: 0,
+            segment_width: 50000,
+            tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+            ..Default::default()
+        }],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let styles = ResolvedStyleSet::default();
+
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        page_number_restarted: false,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 0,
+                },
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 1,
+                },
+            ],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+            overlay_continuations: Vec::new(),
+            overlay_cuts: Vec::new(),
+            inline_placements: Default::default(),
+            inline_flow_plans: Default::default(),
+            paragraph_float_placements: Default::default(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+        ladder_band_tables: Vec::new(),
+    };
+
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &styles,
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+
+    let body = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body node should exist");
+    let col = body
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Column(_)))
+        .expect("body column should exist");
+    let tables: Vec<_> = col
+        .children
+        .iter()
+        .filter(|node| matches!(node.node_type, RenderNodeType::Table(_)))
+        .collect();
+
+    assert_eq!(tables.len(), 2);
+    let tac_bottom = tables[0].bbox.y + tables[0].bbox.height;
+    assert!(
+        tables[1].bbox.y >= tac_bottom - 0.5,
+        "non-TAC table y={} must not overlap previous TAC table bottom {}",
+        tables[1].bbox.y,
+        tac_bottom
+    );
+}
+
+#[test]
+fn tac_behindtext_table_advances_following_paragraph_flow() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+    use crate::model::table::{Cell, Table};
+    use crate::renderer::render_tree::RenderNode;
+
+    fn find_text_run_node<'a>(node: &'a RenderNode, text: &str) -> Option<&'a RenderNode> {
+        if let RenderNodeType::TextRun(run) = &node.node_type {
+            if run.text.contains(text) {
+                return Some(node);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_text_run_node(child, text))
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+
+    let mut common = CommonObjAttr::default();
+    common.treat_as_char = true;
+    common.text_wrap = TextWrap::BehindText;
+    common.vert_rel_to = VertRelTo::Para;
+    common.width = 46944;
+    common.height = 5611;
+
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        common,
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 46944,
+            height: 5611,
+            paragraphs: vec![Paragraph::default()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let paragraphs = vec![
+        Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            line_segs: vec![LineSeg {
+                line_height: 5891,
+                text_height: 5891,
+                baseline_distance: 4400,
+                line_spacing: 1600,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Paragraph {
+            text: "NEXT".to_string(),
+            line_segs: vec![LineSeg {
+                line_height: 5891,
+                text_height: 5891,
+                baseline_distance: 4400,
+                line_spacing: 1600,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    ];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let styles = ResolvedStyleSet::default();
+
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        page_number_restarted: false,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 0,
+                },
+                PageItem::FullParagraph { para_index: 1 },
+            ],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+            overlay_continuations: Vec::new(),
+            overlay_cuts: Vec::new(),
+            inline_placements: Default::default(),
+            inline_flow_plans: Default::default(),
+            paragraph_float_placements: Default::default(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+        ladder_band_tables: Vec::new(),
+    };
+
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &styles,
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+
+    let body = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body node should exist");
+    let col = body
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Column(_)))
+        .expect("body column should exist");
+    let table_node = col
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Table(_)))
+        .expect("TAC BehindText table should render under the body column");
+    let next_text =
+        find_text_run_node(col, "NEXT").expect("following paragraph text should render");
+
+    assert!(
+        next_text.bbox.y >= table_node.bbox.y + table_node.bbox.height - 0.5,
+        "following text y={} must not overlap TAC BehindText table bottom {}",
+        next_text.bbox.y,
+        table_node.bbox.y + table_node.bbox.height
+    );
+}
+
+#[test]
+fn tac_behindtext_table_keeps_same_paragraph_text_below_table() {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+    use crate::model::table::{Cell, Table};
+    use crate::renderer::render_tree::RenderNode;
+
+    fn find_text_run_node<'a>(node: &'a RenderNode, text: &str) -> Option<&'a RenderNode> {
+        if let RenderNodeType::TextRun(run) = &node.node_type {
+            if run.text.contains(text) {
+                return Some(node);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_text_run_node(child, text))
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+
+    let mut common = CommonObjAttr::default();
+    common.treat_as_char = true;
+    common.text_wrap = TextWrap::BehindText;
+    common.vert_rel_to = VertRelTo::Para;
+    common.vertical_offset = 1200;
+    common.width = 46944;
+    common.height = 5611;
+
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        common,
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 46944,
+            height: 5611,
+            paragraphs: vec![Paragraph::default()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    let paragraphs = vec![Paragraph {
+        text: "NEXT".to_string(),
+        controls: vec![Control::Table(Box::new(table))],
+        line_segs: vec![
+            LineSeg {
+                line_height: 5891,
+                text_height: 5891,
+                baseline_distance: 4400,
+                line_spacing: 1600,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            },
+            LineSeg {
+                vertical_pos: 7491,
+                line_height: 5891,
+                text_height: 5891,
+                baseline_distance: 4400,
+                line_spacing: 1600,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    }];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let styles = ResolvedStyleSet::default();
+
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        page_number_restarted: false,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 0,
+                },
+                PageItem::PartialParagraph {
+                    para_index: 0,
+                    start_line: 1,
+                    end_line: 2,
+                },
+            ],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+            overlay_continuations: Vec::new(),
+            overlay_cuts: Vec::new(),
+            inline_placements: Default::default(),
+            inline_flow_plans: Default::default(),
+            paragraph_float_placements: Default::default(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+        ladder_band_tables: Vec::new(),
+    };
+
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &styles,
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+
+    let body = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body node should exist");
+    let col = body
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Column(_)))
+        .expect("body column should exist");
+    let table_node = col
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Table(_)))
+        .expect("TAC BehindText table should render under the body column");
+    let next_text =
+        find_text_run_node(col, "NEXT").expect("same paragraph text should render after table");
+
+    assert!(
+        next_text.bbox.y >= table_node.bbox.y + table_node.bbox.height - 0.5,
+        "same paragraph text y={} must not overlap TAC BehindText table bottom {}",
+        next_text.bbox.y,
+        table_node.bbox.y + table_node.bbox.height
+    );
+}
+
+/// [Task #2220 backport] 지정한 om/host-lh 조합으로 TAC BehindText 표 + 후속
+/// 문단을 배치하고, 후속 문단 "NEXT" 텍스트의 렌더된 y 좌표를 반환한다.
+fn tac_host_line_om_case_next_text_y(outer_margin: i16, host_line_height: i32) -> f64 {
+    use crate::model::control::Control;
+    use crate::model::shape::{CommonObjAttr, TextWrap, VertRelTo};
+    use crate::model::table::{Cell, Table};
+    use crate::renderer::render_tree::RenderNode;
+
+    fn find_text_run_node<'a>(node: &'a RenderNode, text: &str) -> Option<&'a RenderNode> {
+        if let RenderNodeType::TextRun(run) = &node.node_type {
+            if run.text.contains(text) {
+                return Some(node);
+            }
+        }
+        node.children
+            .iter()
+            .find_map(|child| find_text_run_node(child, text))
+    }
+
+    let engine = LayoutEngine::with_default_dpi();
+    let layout = PageLayoutInfo::from_page_def_default(&a4_page_def(), &ColumnDef::default());
+
+    let table_height: u32 = 5611;
+    let mut common = CommonObjAttr::default();
+    common.treat_as_char = true;
+    common.text_wrap = TextWrap::BehindText;
+    common.vert_rel_to = VertRelTo::Para;
+    common.width = 46944;
+    common.height = table_height;
+
+    let table = Table {
+        row_count: 1,
+        col_count: 1,
+        row_sizes: vec![1],
+        common,
+        outer_margin_top: outer_margin,
+        outer_margin_bottom: outer_margin,
+        cells: vec![Cell {
+            col: 0,
+            row: 0,
+            col_span: 1,
+            row_span: 1,
+            width: 46944,
+            height: table_height,
+            paragraphs: vec![Paragraph::default()],
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+
+    let line_spacing = -100; // Fixed 줄간격(음수): #2220 backport 분기 진입 조건.
+
+    let paragraphs = vec![
+        Paragraph {
+            controls: vec![Control::Table(Box::new(table))],
+            line_segs: vec![LineSeg {
+                line_height: host_line_height,
+                text_height: host_line_height,
+                baseline_distance: 4400,
+                line_spacing,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+        Paragraph {
+            text: "NEXT".to_string(),
+            line_segs: vec![LineSeg {
+                line_height: 5891,
+                text_height: 5891,
+                baseline_distance: 4400,
+                line_spacing: 1600,
+                segment_width: 48188,
+                tag: LineSeg::TAG_SINGLE_SEGMENT_LINE,
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    ];
+    let composed: Vec<_> = paragraphs.iter().map(|p| compose_paragraph(p)).collect();
+    let styles = ResolvedStyleSet::default();
+
+    let page_content = PageContent {
+        page_index: 0,
+        page_number: 0,
+        page_number_restarted: false,
+        section_index: 0,
+        layout,
+        column_contents: vec![ColumnContent {
+            column_index: 0,
+            start_height: 0.0,
+            endnote_flow: false,
+            items: vec![
+                PageItem::Table {
+                    para_index: 0,
+                    control_index: 0,
+                },
+                PageItem::FullParagraph { para_index: 1 },
+            ],
+            zone_layout: None,
+            zone_y_offset: 0.0,
+            wrap_around_paras: Vec::new(),
+            used_height: 0.0,
+            wrap_anchors: std::collections::HashMap::new(),
+            overlay_continuations: Vec::new(),
+            overlay_cuts: Vec::new(),
+            inline_placements: Default::default(),
+            inline_flow_plans: Default::default(),
+            paragraph_float_placements: Default::default(),
+        }],
+        active_header: None,
+        active_footer: None,
+        page_number_pos: None,
+        page_hide: None,
+        footnotes: Vec::new(),
+        active_master_page: None,
+        extra_master_pages: Vec::new(),
+        ladder_band_tables: Vec::new(),
+    };
+
+    let tree = engine.build_render_tree(
+        &page_content,
+        &paragraphs,
+        &paragraphs,
+        &paragraphs,
+        &composed,
+        &styles,
+        &FootnoteShape::default(),
+        &[],
+        None,
+        &[],
+        None,
+        0,
+        &[],
+    );
+
+    let body = tree
+        .root
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Body { .. }))
+        .expect("body node should exist");
+    let col = body
+        .children
+        .iter()
+        .find(|n| matches!(n.node_type, RenderNodeType::Column(_)))
+        .expect("body column should exist");
+    find_text_run_node(col, "NEXT")
+        .expect("following paragraph text should render")
+        .bbox
+        .y
+}
+
+/// [Task #2220 backport] 저장 host lh 가 표 높이+outer_margin 상하합을 포함하는
+/// 증거가 있으면(lh=height+om_sum), TAC 호스트 줄 advance 는 outer_margin 이
+/// 전혀 없는(om=0) 동일 lh 기준선과 동일해야 한다 — Task #521
+/// outer_margin_bottom 후가산이 생략되어 이중 계상이 없음을 뜻한다. 결함 시
+/// 후속 본문이 om 상하합만큼 추가로 밀려 이 두 값이 달라진다.
+#[test]
+fn tac_host_line_with_om_covering_stored_lh_does_not_double_count_outer_margin() {
+    let table_height: i32 = 5611;
+    let outer_margin: i16 = 852; // om top == bottom, sum 1704 HU.
+                                 // 저장 host lh = 표 높이 + om 상하합 (한컴이 실제로 저장하는 형태) — 증거 충족.
+    let host_line_height = table_height + i32::from(outer_margin) * 2;
+
+    let with_om = tac_host_line_om_case_next_text_y(outer_margin, host_line_height);
+    let without_om = tac_host_line_om_case_next_text_y(0, host_line_height);
+
+    assert!(
+        (with_om - without_om).abs() < 0.5,
+        "TAC host line om evidence should suppress outer_margin_bottom double-counting: \
+         with_om.y={with_om:.2} must equal om=0 baseline.y={without_om:.2} for the same lh"
+    );
+}
+
+/// [Task #2220 backport regression guard] om 상하합이 저장 lh 에 포함된다는
+/// 증거가 없으면(저장 lh 가 표 높이+om 보다 작음) 기존 Task #521 outer_margin_bottom
+/// 후가산 경로가 그대로 유지되어야 한다 — om>0 케이스는 om=0 기준선보다 후속
+/// 본문 y 가 더 커야 한다. 결함으로 이 후가산이 사라지면 두 값이 같아진다.
+#[test]
+fn tac_host_line_without_om_evidence_keeps_task521_outer_margin_advance() {
+    // 저장 host lh 가 표 높이+om 상하합(7315)보다 뚜렷이 작음 — 증거 미충족.
+    let host_line_height = 2000;
+    let outer_margin: i16 = 852;
+
+    let with_om = tac_host_line_om_case_next_text_y(outer_margin, host_line_height);
+    let without_om = tac_host_line_om_case_next_text_y(0, host_line_height);
+
+    assert!(
+        with_om > without_om + 0.5,
+        "Task #521 outer_margin_bottom advance must stay applied without om coverage evidence: \
+         with_om.y={with_om:.2} should exceed om=0 baseline.y={without_om:.2}"
+    );
+}
+#[test]
+fn rhwp_native_compat_keeps_default_options_disabled() {
+    use crate::renderer::compat::RenderCompatibilityOptions;
+
+    assert_eq!(
+        RenderCompatibilityOptions::default(),
+        RenderCompatibilityOptions::RHWP_NATIVE
+    );
+    assert_eq!(
+        LayoutEngine::with_default_dpi().render_compatibility_options(),
+        RenderCompatibilityOptions::RHWP_NATIVE
+    );
+}
+
+#[test]
 fn test_layout_table_cell_positions() {
     use crate::model::control::Control;
     use crate::model::table::{Cell, Table};

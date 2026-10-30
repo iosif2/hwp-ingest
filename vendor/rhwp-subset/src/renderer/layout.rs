@@ -3,6 +3,7 @@
 //! 페이지 분할 결과를 받아 각 요소의 정확한 위치와 크기를 계산하고
 //! 렌더 트리(PageRenderTree)를 생성한다.
 
+use super::compat::{should_clamp_non_overlay_body_table_to_flow, RenderCompatibilityOptions};
 use super::composer::{
     compose_paragraph, effective_text_for_metrics, first_text_line, ComposedParagraph,
 };
@@ -3645,6 +3646,8 @@ pub struct LayoutEngine {
     /// `DocumentCore` 는 `Send` 여야 한다(native 소비자가 스레드 경계 너머로 소유).
     /// [#3386] 선언 행높이 신뢰를 켤지. 조각 렌더 경로에서만 잠시 끈다.
     declared_trust_allowed: std::cell::Cell<bool>,
+    /// hwp-ingest-local render compatibility options. Defaults to upstream rhwp behavior.
+    render_compatibility_options: std::cell::Cell<RenderCompatibilityOptions>,
     cell_units_cache: std::cell::RefCell<
         std::collections::HashMap<usize, std::sync::Arc<Vec<table_layout::CellUnit>>>,
     >,
@@ -3777,6 +3780,9 @@ impl LayoutEngine {
             item_flow_snap_context: std::cell::Cell::new(None),
             hwpx_page_preview: std::cell::RefCell::new(None),
             declared_trust_allowed: std::cell::Cell::new(true),
+            render_compatibility_options: std::cell::Cell::new(
+                RenderCompatibilityOptions::RHWP_NATIVE,
+            ),
             cell_units_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             table_nested_text_flag_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
             cursor_probe_block_cache: std::cell::RefCell::new(std::collections::HashMap::new()),
@@ -3784,6 +3790,14 @@ impl LayoutEngine {
             #[cfg(test)]
             table_nested_text_flag_scan_count: std::cell::Cell::new(0),
         }
+    }
+
+    pub fn set_render_compatibility_options(&self, options: RenderCompatibilityOptions) {
+        self.render_compatibility_options.set(options);
+    }
+
+    pub fn render_compatibility_options(&self) -> RenderCompatibilityOptions {
+        self.render_compatibility_options.get()
     }
 
     /// [Task #1949] 셀 단위 레이아웃 캐시를 비운다. 문서 재조판 등 IR 이 바뀌는
@@ -4489,6 +4503,16 @@ impl LayoutEngine {
             layout.page_height,
         );
 
+        let previous_paper_width = self.current_paper_width.get();
+        let previous_body_area = self.current_body_area.get();
+        self.current_paper_width.set(layout.page_width);
+        self.current_body_area.set((
+            layout.body_area.x,
+            layout.body_area.y,
+            layout.body_area.width,
+            layout.body_area.height,
+        ));
+
         // 페이지 배경. hide_fill(쪽 배경 감추기) 시 커스텀 채우기(색/그라데이션/이미지)만
         // 숨기고 흰 종이 바탕 pageBackground 는 유지한다. 통째로 스킵하면 raster 기본 투명
         // clear 상태로 남아 export-png 가 RGB flatten 시 페이지 전체가 검게 나온다 (#2083).
@@ -4535,12 +4559,14 @@ impl LayoutEngine {
             );
         }
 
-        // 머리말 (감추기 설정 시 건너뜀)
-        let hide_header = page_content
-            .page_hide
-            .as_ref()
-            .map(|ph| ph.hide_header)
-            .unwrap_or(false);
+        // 머리말 (감추기 설정 또는 변환 옵션 적용 시 건너뜀)
+        let omit_header_footer = self.render_compatibility_options.get().omit_header_footer;
+        let hide_header = omit_header_footer
+            || page_content
+                .page_hide
+                .as_ref()
+                .map(|ph| ph.hide_header)
+                .unwrap_or(false);
         if !hide_header {
             self.build_header(
                 &mut tree,
@@ -4715,12 +4741,13 @@ impl LayoutEngine {
             layout,
         );
 
-        // 꼬리말 + 쪽 번호 (감추기 설정 시 건너뜀)
-        let hide_footer = page_content
-            .page_hide
-            .as_ref()
-            .map(|ph| ph.hide_footer)
-            .unwrap_or(false);
+        // 꼬리말 + 쪽 번호 (감추기 설정 또는 변환 옵션 적용 시 건너뜀)
+        let hide_footer = omit_header_footer
+            || page_content
+                .page_hide
+                .as_ref()
+                .map(|ph| ph.hide_footer)
+                .unwrap_or(false);
         let mut footer_node = if !hide_footer {
             self.build_footer(
                 tree.frame_mut(),
@@ -4774,6 +4801,9 @@ impl LayoutEngine {
                 overlap_px: overlap,
             });
         }
+
+        self.current_paper_width.set(previous_paper_width);
+        self.current_body_area.set(previous_body_area);
 
         tree
     }
@@ -11833,7 +11863,14 @@ impl LayoutEngine {
             // 본문 흐름의 y_offset을 진행시키지 않고 out-of-flow로 paper_images에 렌더한다.
             // (Task #295: vert=Page valign=Bottom 푸터 표가 좌단 y_offset을 본문 하단으로
             //  끌어올려 후속 콘텐츠를 깨뜨리는 문제 수정 — Paper만 다루던 기존 분기를 Page까지 확장)
-            let renders_outside_body = !is_tac
+            let compat_clamps_body_table = should_clamp_non_overlay_body_table_to_flow(
+                self.render_compatibility_options.get(),
+                &t.common,
+                0,
+                self.is_body_flow_col_area(col_area),
+            );
+            let renders_outside_body = !compat_clamps_body_table
+                && !is_tac
                 && matches!(
                     t.common.vert_rel_to,
                     crate::model::shape::VertRelTo::Paper | crate::model::shape::VertRelTo::Page
@@ -11993,6 +12030,11 @@ impl LayoutEngine {
                             v_offset_px,
                             fragment_outer_top_px,
                         )
+                    };
+                    let raw_top = if compat_clamps_body_table {
+                        raw_top.max(y_offset)
+                    } else {
+                        raw_top
                     };
                     let lane_top = para_float_lanes
                         .entry(para_index)
@@ -12163,8 +12205,13 @@ impl LayoutEngine {
                                 para_y_for_table
                             }
                         } else if let Some(anchor_y) = square_anchor_y {
-                            table_visual_shift = (anchor_y - y_offset).max(0.0);
-                            anchor_y
+                            let clamped_anchor_y = if compat_clamps_body_table {
+                                anchor_y.max(y_offset)
+                            } else {
+                                anchor_y
+                            };
+                            table_visual_shift = (clamped_anchor_y - y_offset).max(0.0);
+                            clamped_anchor_y
                         } else if !is_tac
                             && tbl_is_square
                             && matches!(t.common.vert_rel_to, VertRelTo::Para)
