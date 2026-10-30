@@ -2,8 +2,8 @@ hwp-ingest includes a vendored subset of rhwp.
 
 rhwp
 Origin: https://github.com/edwardkim/rhwp
-Imported commit: 03351190ec35436e58cbfee0aa9278a8fdc04a59
-Imported tag: v0.7.17
+Imported commit: 1a76570e833917d15817415a53c09ad61ab3203f
+Imported tag: v0.8.7
 License: MIT
 Copyright: Copyright (c) 2025-2026 Edward Kim
 
