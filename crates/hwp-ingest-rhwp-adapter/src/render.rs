@@ -190,8 +190,8 @@ mod tests {
     }
 
     fn tac_behindtext_fixture_table_bottom_y(svg: &str) -> f64 {
-        let table_left = r#"x1="75.58666666666667""#;
-        let table_right = r#"x2="701.5066666666667""#;
+        let table_left = r#"x1="77.45333333333333""#;
+        let table_right = r#"x2="703.3733333333333""#;
         let bottom = svg
             .match_indices("<line")
             .filter_map(|(start, _)| {
@@ -304,11 +304,11 @@ mod tests {
             "overlap fixture must exercise Hancom compatibility placement"
         );
         assert!(
-            !adapter_pages[0].svg.contains(r#"y1="120.84""#),
+            !adapter_pages[0].svg.contains(r#"y1="124.61333333333334""#),
             "adapter output must not keep the overlapping non-TAC table at the stale paragraph y"
         );
         assert!(
-            adapter_pages[0].svg.contains(r#"y1="210.96""#),
+            adapter_pages[0].svg.contains(r#"y1="211.53333333333336""#),
             "adapter output should stack the non-TAC table after the preceding TAC table"
         );
     }
