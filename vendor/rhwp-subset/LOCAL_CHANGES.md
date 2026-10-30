@@ -2,6 +2,22 @@
 
 This file records hwp-ingest-local changes applied after the recorded upstream import because vendor/rhwp-subset is a surgical source subset and does not carry upstream git history. Keep one reverse-chronological entry per hwp-ingest commit that changes upstream-derived source files.
 
+## 2026-10-30 — v0.8.7 resync: vendored manifest adaptation
+
+Status: hwp-ingest-local build adaptation of the unmodified v0.8.7 import; no parser/layout/render source is changed.
+
+Scope: `vendor/rhwp-subset/Cargo.toml` and stale subset files only. Upstream `src/` and `crates/rhwp-*` are untouched.
+
+Problem: The upstream v0.8.7 manifest declares its own `[workspace]` (with tools/bindings members), 48 `[[test]]` and 12 `[[example]]` targets pointing at files that are not part of this subset, two `[[bin]]` targets (`rhwp`, `font-metric-gen`) whose `src/main.rs` `include_str!`s upstream docs (`llms.txt`, `mydocs/manual/*`), a `[patch.crates-io] svg2pdf` pointing at an unimported `vendor/svg2pdf`, and `[profile.*]` tables. The subset is a path dependency of the hwp-ingest workspace, so none of these can load or take effect there.
+
+Behavior: Removed the nested `[workspace]`, all `[[test]]`/`[[example]]` targets, the `[[bin]]` targets, `[patch.crates-io]`, and `[profile.*]`; added `autobins = false`. The library target, dependencies, features, and lints are unchanged. `src/main.rs`, `src/tools/`, and other upstream files stay on disk unmodified. Removed the stale `examples/pr599_png_gateway.rs`, whose explicit upstream target no longer exists.
+
+Verification: `cargo check -p rhwp --lib` passes against the unmodified v0.8.7 library source.
+
+Files: `Cargo.toml`, `LOCAL_CHANGES.md`, `examples/pr599_png_gateway.rs` (deleted).
+
+Upstream sync: Re-apply the same removals on every resync; the svg2pdf patch is intentionally not carried because hwp-ingest renders PDFs through its own `pdf_backend`.
+
 ## 2026-08-19 — Paper-anchored BehindText/InFrontOfText table absolute placement (upstream backport, adapted)
 
 Status: selective upstream backport, adapted to this subset's baseline; not a local invention. Ports the intent of upstream commit `c5f6f7278` (upstream Issue #1994), reimplemented against this subset's simpler pre-#1858 gate (see Root cause) rather than cherry-picked verbatim.
