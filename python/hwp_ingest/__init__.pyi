@@ -1,12 +1,23 @@
 from os import PathLike
 from pathlib import Path
 
-from ._native import DocumentInfo, HwpIngestError
+from ._native import (
+    DocumentInfo,
+    HwpIngestError,
+    InvalidPageRangeError,
+    PageText,
+    TextExtraction,
+)
 
 __all__ = [
     "DocumentInfo",
     "HwpIngestError",
+    "InvalidPageRangeError",
+    "PageText",
+    "TextExtraction",
     "analyze_bytes",
+    "extract_text_bytes",
+    "extract_text_file",
     "to_pdf_bytes",
     "to_pdf_file",
     "to_svg_pages",
@@ -60,4 +71,24 @@ def to_svg_files(
     omit_header_footer: bool = False,
 ) -> list[Path]:
     """Render HWP document pages into SVG files and return the created paths."""
+    ...
+
+
+def extract_text_bytes(
+    data: bytes,
+    *,
+    pages: range | None = None,
+    omit_header_footer: bool = False,
+) -> TextExtraction:
+    """Extract the text of a zero-based, half-open page range from HWP or HWPX bytes."""
+    ...
+
+
+def extract_text_file(
+    input_path: str | PathLike[str],
+    *,
+    pages: range | None = None,
+    omit_header_footer: bool = False,
+) -> TextExtraction:
+    """Extract the text of a zero-based, half-open page range from an HWP or HWPX file."""
     ...
