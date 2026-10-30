@@ -12,7 +12,7 @@ use super::*;
 /// LIST_HEADER for Footnote (size=16): paraCount(SInt4) + property(UInt4) + 8 byte zero padding.
 ///
 /// 참조: `hwplib::ControlFootnote` + `CtrlHeaderFootnote`.
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Footnote {
     /// 각주 번호
     pub number: u16,
@@ -28,10 +28,17 @@ pub struct Footnote {
     pub instance_id: u32,
     /// LIST_HEADER property (UInt4, default 0)
     pub list_header_property: u32,
+    /// [#6872] 장식 문자를 HWPX 가 `userChar` 로 실었는가.
+    ///
+    /// HWPX 의 `<hp:footNote>`/`<hp:endNote>` 는 번호 모양이 사용자 기호일 때
+    /// `suffixChar` 대신 `userChar` 에 그 기호를 싣는다(실측: `156513948` 각주 5개가
+    /// `userChar="42"`). HWP5 의 CTRL_FOOTNOTE 에는 장식 문자 슬롯이 하나뿐이라 값은
+    /// 같은 자리에 두고, **어느 이름으로 왔는지**만 기억해 왕복에서 되돌린다.
+    pub decoration_is_user_char: bool,
 }
 
 /// 미주 ('en  ' 컨트롤) — [Task #1050] Footnote 와 동일 구조
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct Endnote {
     /// 미주 번호
     pub number: u16,
@@ -47,10 +54,17 @@ pub struct Endnote {
     pub instance_id: u32,
     /// LIST_HEADER property (UInt4)
     pub list_header_property: u32,
+    /// [#6872] 장식 문자를 HWPX 가 `userChar` 로 실었는가.
+    ///
+    /// HWPX 의 `<hp:footNote>`/`<hp:endNote>` 는 번호 모양이 사용자 기호일 때
+    /// `suffixChar` 대신 `userChar` 에 그 기호를 싣는다(실측: `156513948` 각주 5개가
+    /// `userChar="42"`). HWP5 의 CTRL_FOOTNOTE 에는 장식 문자 슬롯이 하나뿐이라 값은
+    /// 같은 자리에 두고, **어느 이름으로 왔는지**만 기억해 왕복에서 되돌린다.
+    pub decoration_is_user_char: bool,
 }
 
 /// 각주/미주 모양 (HWPTAG_FOOTNOTE_SHAPE)
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct FootnoteShape {
     /// 속성 비트 플래그
     pub attr: u32,
@@ -64,8 +78,9 @@ pub struct FootnoteShape {
     pub suffix_char: char,
     /// 시작 번호
     pub start_number: u16,
-    /// 구분선 길이
-    pub separator_length: HwpUnit16,
+    /// 구분선 길이. 한컴 미주 기본값 noteLine="14692344"(전폭 sentinel)이
+    /// i16 범위를 넘으므로 i32로 보존한다(i16 절단 시 0x2ff8=12280 → 짧은 구분선 버그).
+    pub separator_length: i32,
     /// HWPX 원본 슬롯: 구분선 위 여백.
     pub separator_margin_top: HwpUnit16,
     /// HWP5 원본 슬롯: 구분선 위 여백. HWPX 경로의 과거 매핑값 보존에도 사용될 수 있다.
@@ -88,6 +103,15 @@ pub struct FootnoteShape {
     pub print_inline_after_text: bool,
     /// HWP5 미문서화 2바이트. 한컴 UI의 "주석 사이" 값으로 사용된다.
     pub raw_unknown: u16,
+    /// [#6872] HWPX `<hp:autoNumFormat>` 의 장식 문자 속성을 **원본에서 실제로 읽었는지**.
+    ///
+    /// `'\0'` 하나로는 "원본이 명시적으로 비웠다"와 "IR 이 설정된 적 없다"를 못 가른다.
+    /// `#2742` 는 후자에서 템플릿 기본값(`suffixChar=")"`)을 유지해야 한다고 못박았고
+    /// (`issue2742_auto_num_format_keeps_template_when_ir_unset`), 전자를 그 규약으로
+    /// 처리하면 사용자 기호 각주 `*` 가 `*)` 가 된다(156513948 정답지 실측).
+    ///
+    /// HWPX 파서만 `true` 로 세운다 — HWP5/HWP3 경로는 종전 폴백을 그대로 쓴다.
+    pub deco_chars_from_source: bool,
 }
 
 impl FootnoteShape {
@@ -236,7 +260,7 @@ impl FootnoteShape {
 }
 
 /// 번호 형식
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
 pub enum NumberFormat {
     #[default]
     Digit, // 1, 2, 3
@@ -261,7 +285,7 @@ pub enum NumberFormat {
 }
 
 /// 번호 매기기 방식
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
 pub enum FootnoteNumbering {
     #[default]
     /// 앞 구역에 이어서
@@ -273,7 +297,7 @@ pub enum FootnoteNumbering {
 }
 
 /// 배치 방법
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
 pub enum FootnotePlacement {
     #[default]
     /// 각 단마다 따로 배열 / 문서의 마지막

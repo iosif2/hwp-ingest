@@ -2,37 +2,43 @@
 
 This file records hwp-ingest-local changes applied after the recorded upstream import because vendor/rhwp-subset is a surgical source subset and does not carry upstream git history. Keep one reverse-chronological entry per hwp-ingest commit that changes upstream-derived source files.
 
-## 2026-08-19 — Paper-anchored BehindText/InFrontOfText table absolute placement (upstream backport, adapted)
+## 2026-10-30 — v0.8.7 resync: local patch inventory
 
-Status: selective upstream backport, adapted to this subset's baseline; not a local invention. Ports the intent of upstream commit `c5f6f7278` (upstream Issue #1994), reimplemented against this subset's simpler pre-#1858 gate (see Root cause) rather than cherry-picked verbatim.
+Status: current hwp-ingest-local delta against unmodified upstream v0.8.7 (`1a76570e833917d15817415a53c09ad61ab3203f`). Production changes are about 90 lines plus `src/renderer/compat.rs`; everything else in this tree is upstream.
 
-Scope: vendor/rhwp-subset TAC/non-TAC table placement classification in the typeset pagination path used by hwp-ingest conversion; product adapter/core/Python API policy remains outside the vendored tree.
+Retained (re-applied by hand onto the v0.8.7 layout, which was restructured since v0.7.17):
 
-Problem: A non-treat-as-char, Paper-anchored table with BehindText or InFrontOfText wrapping (drawn at an absolute page position, e.g. a full-page schedule table anchored `vert=Paper`) was not recognized by the existing Paper-anchored absolute-placement gate, which only covered TopAndBottom wrapping. When such a table's measured height exceeded the available page space (a common case for full-page decorative/background tables), it fell through to the RowBreak flow-splitting path, ignored its absolute Y position, and was fragmented into multiple `PartialTable` pages — overlapping any earlier BehindText table on the same page instead of stacking after it.
+1. Hancom render compatibility shim — `src/renderer/compat.rs` (new), `LayoutEngine::{set_,}render_compatibility_options` and body-table clamp in `src/renderer/layout.rs`, `compute_table_y_position` clamp and `body_flow_context` plumbing in `src/renderer/layout/table_layout.rs`, `render_page_svg_native_with_compat` in `src/document_core/queries/rendering.rs` and `src/wasm_api.rs`, `pub mod compat` in `src/renderer/mod.rs`, and the CommonObjAttr flags write in `src/document_core/commands/table_ops.rs`. Also keeps the early `current_paper_width`/`current_body_area` set-and-restore in `build_render_tree`, so `is_body_flow_col_area` never reads the previous page's body area while headers/footers are laid out.
+2. `RenderCompatibilityOptions::omit_header_footer` — header/footer omission in `build_render_tree` (`src/renderer/layout.rs`).
+3. Paginator TAC remnant — `pre_table_end_line` in `src/renderer/pagination/engine.rs` no longer forces host text before a treat-as-char table when `vertical_offset > 0`.
+4. Local regression tests for the above in `src/renderer/layout/tests.rs`, `src/renderer/pagination/tests.rs`, and `src/wasm_api/tests.rs`, plus unit tests in `compat.rs`.
 
-Root cause: `TypesetEngine::typeset_block_table`'s Paper-anchored absolute-placement gate (`is_paper_topbottom_block`) matched only `TextWrap::TopAndBottom`. Upstream's later commit `c5f6f7278` extends this gate as part of a larger refactor (upstream Task #1858's `can_sync`/`has_preceding_paper_float` handling and a 10-argument `place_table_with_text`) that postdates this subset's baseline; only the gate-extension intent was ported, adapted to this subset's simpler (9-argument) `place_table_with_text` and single-condition gate.
+Dropped because upstream v0.8.7 already contains an equivalent:
 
-Behavior: The gate (`is_paper_floating_block`) now also matches `BehindText`/`InFrontOfText`. Unlike TopAndBottom (which still syncs `current_height` to the table's stored vertical position when possible), BehindText/InFrontOfText tables are placed absolutely with zero flow advance unconditionally (no `current_height` sync, since these decorate over/under body text rather than push it), preventing RowBreak fragmentation regardless of page-fit. The existing TopAndBottom sync path is unchanged.
+- TAC BehindText flow reservation: Paginator gate (`engine.rs`, upstream #1995), TypesetEngine (`typeset/controls/table_entry.rs`, `!treat_as_char`), and table layout (`table_layout.rs`, `!table.common.treat_as_char`). The `pre_table_end_line` case above is the only part upstream does not cover.
+- Backport `e893b65d9` (upstream Task #2220, TAC host line `outer_margin` double-counting) and backports `c5f6f7278`/`a11997ea4` (upstream Issue #1994, Paper-anchored BehindText/InFrontOfText absolute placement). Both are ancestors of v0.8.7.
 
-Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/renderer/typeset.rs`.
+Rendering delta to expect: fixture SVGs differ from the v0.7.17 baseline (non-TAC table in the overlap fixture moves from y=210.96 to y=211.53; the TAC BehindText fixture table moves +1.86px in x) with vertical flow unchanged. These come from upstream layout changes, not from the local patches.
 
-Upstream sync: Remove this local patch once the vendor baseline is resynced to a commit that includes upstream `c5f6f7278`/`a11997ea4` or a later equivalent fix.
+Verification: vendored unit tests run against a scratch copy with upstream test assets overlaid (the repo does not carry them): `renderer::compat::`, `hancom_render_compat`, `tac_behindtext`, `text_after_tac_behindtext`, `rhwp_native_compat`, `render_page_svg_native_with_compat` — 12 passed.
 
-## 2026-08-19 — TAC host line outer_margin double-counting fix (upstream backport)
+Upstream sync: Drop items 1-2 only if upstream exposes an equivalent transient render option; drop item 3 if upstream stops forcing host text before TAC tables with a vertical offset.
 
-Status: selective upstream backport, adapted to this subset's baseline; not a local invention. Ports upstream commit `e893b65d9` (upstream Task #2220).
+## 2026-10-30 — v0.8.7 resync: vendored manifest adaptation
 
-Scope: vendor/rhwp-subset TAC table host-line advance calculation in the SVG/PDF render tree layout path used by hwp-ingest conversion; product adapter/core/Python API policy remains outside the vendored tree.
+Status: hwp-ingest-local build adaptation of the unmodified v0.8.7 import; no parser/layout/render source is changed.
 
-Problem: When a document's saved host `LineSeg.line_height` already accounts for a treat-as-char (TAC) table's declared height plus its `outer_margin_top`/`outer_margin_bottom`, the existing Task #9/#521 advance calculation applied `outer_margin_bottom` a second time on top of that already-inclusive line height, pushing following body content down by the outer_margin sum and clipping the bottom line of the affected column/page.
+Scope: `vendor/rhwp-subset/Cargo.toml` and stale subset files only. Upstream `src/` and `crates/rhwp-*` are untouched.
 
-Root cause: `LayoutEngine::layout_table_item`'s TAC advance branch (negative `line_spacing`, Fixed line spacing) always computed `y_offset = tac_table_y_before + advance` and then unconditionally added `outer_margin_bottom_px` (Task #521), with no check for whether `advance` (derived from the stored `line_height`) already included the table's outer margins.
+Problem: The upstream v0.8.7 manifest declares its own `[workspace]` (with tools/bindings members), 48 `[[test]]` and 12 `[[example]]` targets pointing at files that are not part of this subset, two `[[bin]]` targets (`rhwp`, `font-metric-gen`) whose `src/main.rs` `include_str!`s upstream docs (`llms.txt`, `mydocs/manual/*`), a `[patch.crates-io] svg2pdf` pointing at an unimported `vendor/svg2pdf`, and `[profile.*]` tables. The subset is a path dependency of the hwp-ingest workspace, so none of these can load or take effect there.
 
-Behavior: When stored `line_height >= table height + outer_margin_top + outer_margin_bottom - 10` (HWPUNIT tolerance) and the margin sum is positive, the advance now uses `para_y_for_table + advance` and skips the Task #521 `outer_margin_bottom` addition, matching upstream `e893b65d9`. Paths without this coverage evidence (the common case Task #9/#521 were calibrated against) are unchanged.
+Behavior: Removed the nested `[workspace]`, all `[[test]]`/`[[example]]` targets, the `[[bin]]` targets, `[patch.crates-io]`, and `[profile.*]`; added `autobins = false`. The library target, dependencies, features, and lints are unchanged. `src/main.rs`, `src/tools/`, and other upstream files stay on disk unmodified. Removed the stale `examples/pr599_png_gateway.rs`, whose explicit upstream target no longer exists.
 
-Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/renderer/layout.rs`, and `src/renderer/layout/tests.rs`.
+Verification: `cargo check -p rhwp --lib` passes against the unmodified v0.8.7 library source.
 
-Upstream sync: Remove this local patch once the vendor baseline is resynced to a commit that includes upstream `e893b65d9` or a later equivalent fix.
+Files: `Cargo.toml`, `LOCAL_CHANGES.md`, `examples/pr599_png_gateway.rs` (deleted).
+
+Upstream sync: Re-apply the same removals on every resync; the svg2pdf patch is intentionally not carried because hwp-ingest renders PDFs through its own `pdf_backend`.
 
 ## 2026-07-09 — render option for header/footer omission
 
@@ -47,22 +53,6 @@ Behavior: `RenderCompatibilityOptions::omit_header_footer` defaults to `false` f
 Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/renderer/compat.rs`, `src/renderer/layout.rs`, and `src/document_core/queries/rendering.rs`.
 
 Upstream sync: Default rhwp/native behavior remains unchanged; remove this local option only when upstream provides an equivalent non-mutating, transient render option for Header/Footer omission.
-
-## 2026-07-07 — TAC BehindText table flow reservation
-
-Status: hwp-ingest-local renderer compatibility fix; upstream contribution candidate.
-
-Scope: vendor/rhwp-subset pagination/typeset/layout table classification and regression coverage, plus adapter fixture coverage for the public SVG/PDF path; product adapter/core/Python policy remains outside the vendored tree.
-
-Problem: Treat-as-char tables saved with BehindText wrapping were classified as non-flowing Shape items before TAC handling in both pagination and typeset paths, and table layout also treated behind/front wrapping as no-advance regardless of TAC, so following body text rendered over the table.
-
-Root cause: The BehindText/InFrontOfText table branches in Paginator::process_controls and TypesetEngine table placement ran before checking table.common.treat_as_char, and LayoutEngine::layout_table returned y_start for behind/front tables without excluding TAC tables.
-
-Behavior: Non-TAC behind/front tables still render as overlay shapes with no flow advance, while TAC behind/front tables continue through table pagination/typesetting/layout and reserve flow space when non-inline.
-
-Files: `LOCAL_CHANGES.md`, `README.vendor.md`, `src/renderer/pagination/engine.rs`, `src/renderer/typeset.rs`, `src/renderer/layout/table_layout.rs`, `src/renderer/pagination/tests.rs`, `src/renderer/layout/tests.rs`, `crates/hwp-ingest-rhwp-adapter/src/render.rs`, `tests/fixtures/tac-behindtext-table-flow.hwp`, and `tests/fixtures/README.md`.
-
-Upstream sync: Remove this local patch only when upstream rhwp treats TAC tables as flow-reserving before applying behind/front overlay classification and layout no-advance rules.
 
 ## 2026-07-06 — vendor-local Hancom render compatibility shim
 

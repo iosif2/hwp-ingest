@@ -180,25 +180,35 @@ impl<'a> TextShapeLowerer<'a> {
                     .collect::<HashSet<_>>();
                 let mut lowered = Vec::with_capacity(ops.len());
                 for op in ops.drain(..) {
-                    if let PaintOp::TextRun { bbox, run } = op {
-                        let text_source_id = *next_text_source_id;
+                    if let PaintOp::TextRun { bbox, run, source } = op {
+                        let source = source.unwrap_or_else(|| {
+                            crate::paint::TextSourceSpan::for_text_run(*next_text_source_id, &run)
+                        });
+                        let text_source_id = source.id.0;
+                        *next_text_source_id =
+                            (*next_text_source_id).max(text_source_id.saturating_add(1));
                         let equivalence_group = format!("text-{text_source_id}");
                         if existing_glyph_groups.contains(&equivalence_group) {
-                            lowered.push(PaintOp::TextRun { bbox, run });
-                            *next_text_source_id = (*next_text_source_id).saturating_add(1);
+                            lowered.push(PaintOp::TextRun {
+                                bbox,
+                                run,
+                                source: Some(source),
+                            });
                             continue;
                         }
-                        let (diagnostic, glyph_run) =
-                            self.lower_text_run(bbox, &run, text_source_id);
+                        let (diagnostic, glyph_run) = self.lower_text_run(bbox, &run, &source);
                         report.diagnostics.push(diagnostic);
-                        lowered.push(PaintOp::TextRun { bbox, run });
+                        lowered.push(PaintOp::TextRun {
+                            bbox,
+                            run,
+                            source: Some(source),
+                        });
                         if let Some(glyph_run) = glyph_run {
                             lowered.push(PaintOp::GlyphRun {
                                 bbox,
                                 run: Box::new(glyph_run),
                             });
                         }
-                        *next_text_source_id = (*next_text_source_id).saturating_add(1);
                     } else {
                         lowered.push(op);
                     }
@@ -209,24 +219,25 @@ impl<'a> TextShapeLowerer<'a> {
     }
 
     fn analyze_text_run(&self, run: &TextRunNode) -> TextShapeDiagnostic {
-        self.evaluate_text_run(None, run, 0).0
+        self.evaluate_text_run(None, run, None).0
     }
 
     fn lower_text_run(
         &self,
         bbox: BoundingBox,
         run: &TextRunNode,
-        text_source_id: u32,
+        source: &crate::paint::TextSourceSpan,
     ) -> (TextShapeDiagnostic, Option<LayerGlyphRunPaint>) {
-        self.evaluate_text_run(Some(bbox), run, text_source_id)
+        self.evaluate_text_run(Some(bbox), run, Some(source))
     }
 
     fn evaluate_text_run(
         &self,
         bbox: Option<BoundingBox>,
         run: &TextRunNode,
-        text_source_id: u32,
+        source: Option<&crate::paint::TextSourceSpan>,
     ) -> (TextShapeDiagnostic, Option<LayerGlyphRunPaint>) {
+        let text_source_id = source.map_or(0, |source| source.id.0);
         if run.char_overlap.is_some() || run.text.is_empty() {
             return (
                 TextShapeDiagnostic {
@@ -296,22 +307,13 @@ impl<'a> TextShapeLowerer<'a> {
                         reason = shaped.diagnostics.reason.clone();
                         public_glyph_run_emitted = true;
                         public_glyph_run = Some(LayerGlyphRunPaint {
-                            source: crate::paint::TextSourceSpan {
-                                id: crate::paint::TextSourceId(text_source_id),
-                                utf8_range: crate::paint::TextSourceRange::new(
-                                    0,
-                                    run.text.len() as u32,
-                                ),
-                                utf16_range: crate::paint::TextSourceRange::new(
-                                    0,
-                                    run.text.encode_utf16().count() as u32,
-                                ),
-                                stable_source_key: None,
-                            },
+                            source: source.cloned().unwrap_or_else(|| {
+                                crate::paint::TextSourceSpan::for_text_run(0, run)
+                            }),
                             variant: glyph_variant,
                             paint_style: paint_style.clone(),
                             shape_key: shaped.shape_key.clone(),
-                            placement: fallback_placement(bbox, run),
+                            placement: text_run_placement(bbox, run),
                             glyph_ids: shaped.glyph_ids,
                             positions: shaped.positions,
                             advances: shaped.advances,
@@ -345,7 +347,7 @@ impl<'a> TextShapeLowerer<'a> {
     }
 }
 
-fn fallback_placement(bbox: BoundingBox, run: &TextRunNode) -> TextRunPlacement {
+pub(crate) fn text_run_placement(bbox: BoundingBox, run: &TextRunNode) -> TextRunPlacement {
     let radians = run.rotation.to_radians();
     let (sin, cos) = radians.sin_cos();
     let local_origin_x = -bbox.width / 2.0;
@@ -505,6 +507,8 @@ mod tests {
             border_fill_id: 0,
             baseline: 12.0,
             field_marker: crate::renderer::render_tree::FieldMarkerType::None,
+            layout_positions: None,
+            display_text: None,
         }
     }
 
@@ -513,10 +517,10 @@ mod tests {
         let root = LayerNode::leaf(
             BoundingBox::new(0.0, 0.0, 100.0, 100.0),
             None,
-            vec![PaintOp::TextRun {
-                bbox: BoundingBox::new(0.0, 0.0, 20.0, 20.0),
-                run: text_run("A"),
-            }],
+            vec![PaintOp::text_run(
+                BoundingBox::new(0.0, 0.0, 20.0, 20.0),
+                text_run("A"),
+            )],
         );
         let lowerer = TextShapeLowerer::diagnostics_only(&PortableResolver);
         let report = lowerer.analyze_root(&root);
@@ -539,10 +543,10 @@ mod tests {
         let mut root = LayerNode::leaf(
             BoundingBox::new(0.0, 0.0, 100.0, 100.0),
             None,
-            vec![PaintOp::TextRun {
-                bbox: BoundingBox::new(0.0, 0.0, 20.0, 20.0),
-                run: text_run("A"),
-            }],
+            vec![PaintOp::text_run(
+                BoundingBox::new(0.0, 0.0, 20.0, 20.0),
+                text_run("A"),
+            )],
         );
         let lowerer = TextShapeLowerer::new(&PortableResolver);
         let report = lowerer.lower_root(&mut root);
@@ -574,10 +578,10 @@ mod tests {
         let mut root = LayerNode::leaf(
             BoundingBox::new(0.0, 0.0, 100.0, 100.0),
             None,
-            vec![PaintOp::TextRun {
-                bbox: BoundingBox::new(0.0, 0.0, 20.0, 20.0),
-                run: text_run("A"),
-            }],
+            vec![PaintOp::text_run(
+                BoundingBox::new(0.0, 0.0, 20.0, 20.0),
+                text_run("A"),
+            )],
         );
         let lowerer = TextShapeLowerer::new(&EmittingResolver);
         let report = lowerer.lower_root(&mut root);
@@ -603,10 +607,10 @@ mod tests {
         let mut root = LayerNode::leaf(
             BoundingBox::new(0.0, 0.0, 100.0, 100.0),
             None,
-            vec![PaintOp::TextRun {
-                bbox: BoundingBox::new(0.0, 0.0, 20.0, 20.0),
-                run: text_run("A"),
-            }],
+            vec![PaintOp::text_run(
+                BoundingBox::new(0.0, 0.0, 20.0, 20.0),
+                text_run("A"),
+            )],
         );
         let lowerer = TextShapeLowerer::new(&EmittingResolver);
         let first_report = lowerer.lower_root(&mut root);
@@ -632,10 +636,10 @@ mod tests {
         let mut root = LayerNode::leaf(
             BoundingBox::new(0.0, 0.0, 100.0, 100.0),
             None,
-            vec![PaintOp::TextRun {
-                bbox: BoundingBox::new(0.0, 0.0, 20.0, 20.0),
+            vec![PaintOp::text_run(
+                BoundingBox::new(0.0, 0.0, 20.0, 20.0),
                 run,
-            }],
+            )],
         );
         let lowerer = TextShapeLowerer::new(&EmittingResolver);
         let report = lowerer.lower_root(&mut root);

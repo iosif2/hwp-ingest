@@ -1,6 +1,8 @@
 use skia_safe::{font, paint, Canvas, Color, Font, FontMgr, FontStyle, Paint, PathBuilder};
 
-use super::font_lookup::{match_system_family_style, SystemFontFamilies};
+use super::font_lookup::{
+    legacy_typeface_for_style, match_system_family_style, SystemFontFamilies,
+};
 
 use crate::renderer::equation::ast::MatrixStyle;
 use crate::renderer::equation::layout::{
@@ -69,6 +71,36 @@ fn render_box(
             }
         }
         LayoutKind::Text(text) => {
+            if crate::renderer::equation::text_has_cjk(text)
+                && (lb.width
+                    - crate::renderer::equation::layout::estimate_text_width(
+                        text,
+                        font_size_from_box(lb, fs),
+                        false,
+                    ))
+                .abs()
+                    > 0.01
+            {
+                let font_size = font_size_from_box(lb, fs);
+                for (ch, offset) in
+                    crate::renderer::equation::positioned_cjk_text(text, font_size, lb.width)
+                {
+                    draw_text(
+                        canvas,
+                        font_mgr,
+                        system_families,
+                        &ch.to_string(),
+                        x + offset,
+                        y + lb.baseline,
+                        font_size,
+                        false,
+                        bold,
+                        color,
+                        false,
+                    );
+                }
+                return;
+            }
             draw_text(
                 canvas,
                 font_mgr,
@@ -688,18 +720,25 @@ fn draw_text(
     if text.is_empty() {
         return;
     }
-    let font_style = match (bold, italic) {
+    // 수식의 한글은 SVG/Canvas와 같은 명조 대체 글꼴과 정체 스타일을 쓴다.
+    let has_cjk = crate::renderer::equation::text_has_cjk(text);
+    let family = if has_cjk {
+        crate::renderer::equation::CJK_EQUATION_FONT_FAMILY
+    } else {
+        EQ_FONT_FAMILY
+    };
+    let font_style = match (bold, italic && !has_cjk) {
         (true, true) => FontStyle::bold_italic(),
         (true, false) => FontStyle::bold(),
         (false, true) => FontStyle::italic(),
         (false, false) => FontStyle::normal(),
     };
-    let typeface = EQ_FONT_FAMILY
+    let typeface = family
         .split(',')
         .map(str::trim)
         .filter(|family| !family.is_empty())
         .find_map(|family| match_system_family_style(font_mgr, system_families, family, font_style))
-        .or_else(|| font_mgr.legacy_make_typeface(None::<&str>, font_style));
+        .or_else(|| legacy_typeface_for_style(font_mgr, font_style));
     let mut font = if let Some(typeface) = typeface {
         Font::new(typeface, font_size as f32)
     } else {

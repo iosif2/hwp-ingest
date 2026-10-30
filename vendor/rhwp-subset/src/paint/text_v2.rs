@@ -15,7 +15,8 @@ use crate::model::style::UnderlineType;
 use crate::paint::{
     GlyphOutlinePayloadKind, GlyphRunDiagnostics, GlyphRunOrientation, GlyphRunReplayEligibility,
     LayerGlyphOutlinePaint, LayerGlyphRunPaint, LayerNode, LayerNodeKind, PageLayerTree, PaintOp,
-    ResourceArena, TextVariantKind, TextVariantQuality, RESOURCE_KEY_ALGORITHM,
+    ResourceArena, TextDirection, TextVariantKind, TextVariantQuality, WritingMode,
+    MAX_PORTABLE_FONT_BLOB_BYTES, RESOURCE_KEY_ALGORITHM,
 };
 use crate::renderer::render_tree::{FieldMarkerType, TextRunNode};
 
@@ -548,6 +549,13 @@ fn glyph_run_diagnostics_are_strict(diagnostics: &GlyphRunDiagnostics) -> bool {
 fn glyph_run_is_strict(run: &LayerGlyphRunPaint, resources: &ResourceArena) -> bool {
     glyph_run_diagnostics_are_strict(&run.diagnostics)
         && matches!(run.orientation, GlyphRunOrientation::Horizontal)
+        && !run.shape_key.font_instance.synthetic_bold
+        && !run.shape_key.font_instance.synthetic_italic
+        && matches!(run.direction, TextDirection::Ltr)
+        && matches!(run.shape_key.direction, TextDirection::Ltr)
+        && run.bidi_level == Some(0)
+        && matches!(run.writing_mode, WritingMode::HorizontalTb)
+        && matches!(run.shape_key.writing_mode, WritingMode::HorizontalTb)
         && run.glyph_transforms.is_none()
         && glyph_run_font_proof_fallback_reason(run, resources).is_none()
 }
@@ -570,6 +578,22 @@ fn glyph_run_fallback_reason(
     }
     if run.glyph_transforms.is_some() {
         return Some("glyphTransformAuthorityPending".to_string());
+    }
+    if run.shape_key.font_instance.synthetic_bold || run.shape_key.font_instance.synthetic_italic {
+        return Some("syntheticStyleAuthorityPending".to_string());
+    }
+    if !matches!(run.direction, TextDirection::Ltr)
+        || !matches!(run.shape_key.direction, TextDirection::Ltr)
+    {
+        return Some("bidiDirectionAuthorityPending".to_string());
+    }
+    if run.bidi_level != Some(0) {
+        return Some("bidiLevelAuthorityPending".to_string());
+    }
+    if !matches!(run.writing_mode, WritingMode::HorizontalTb)
+        || !matches!(run.shape_key.writing_mode, WritingMode::HorizontalTb)
+    {
+        return Some("writingModeAuthorityPending".to_string());
     }
     if !run.shape_key.font_instance.variations.is_empty() {
         return Some("variationUnsupported".to_string());
@@ -631,9 +655,6 @@ fn glyph_run_font_proof_fallback_reason(
     else {
         return Some("fontFaceMissing".to_string());
     };
-    if face.face_index != 0 {
-        return Some("faceIndexUnsupported".to_string());
-    }
     let Some(blob) = font_resources
         .blobs
         .iter()
@@ -649,6 +670,9 @@ fn glyph_run_font_proof_fallback_reason(
     }
     match resources.font_blob_bytes_for_ref(data_ref) {
         Some(bytes) => {
+            if bytes.len() > MAX_PORTABLE_FONT_BLOB_BYTES {
+                return Some("fontBlobTooLarge".to_string());
+            }
             let actual_digest = crate::paint::resource_digest_hex(bytes);
             if !font_digest_matches_resource_digest(digest, &actual_digest)
                 || !blob.digest.as_ref().is_none_or(|digest| {
@@ -656,6 +680,9 @@ fn glyph_run_font_proof_fallback_reason(
                 })
             {
                 return Some("fontBlobDigestMismatch".to_string());
+            }
+            if ttf_parser::Face::parse(bytes, face.face_index).is_err() {
+                return Some("faceIndexUnsupported".to_string());
             }
         }
         None => {
@@ -692,7 +719,12 @@ fn glyph_outline_fallback_reason(outline: &LayerGlyphOutlinePaint) -> Option<Str
     if let Some(reason) = glyph_run_diagnostics_fallback_reason(&outline.diagnostics) {
         return Some(reason);
     }
-    if outline.paths.is_empty() {
+    if outline.paths.is_empty()
+        && matches!(
+            outline.payload_kind,
+            GlyphOutlinePayloadKind::MonochromeFill | GlyphOutlinePayloadKind::MonochromeFillStroke
+        )
+    {
         return Some("emptyGlyphOutline".to_string());
     }
     if !outline.paint_style.is_fill_only_glyph_replay() {
@@ -755,7 +787,9 @@ fn line_break_risk_for_run(leaf_path: &str, run: &TextRunNode) -> Option<TextV2L
         || run.style.emboss
         || run.style.engrave
         || run.style.emphasis_dot != 0
-        || run.style.shade_color != 0x00FF_FFFF
+        // [#4155] 종전엔 마스크 없이 흰색과만 비교해 "음영 없음" sentinel 0xFFFFFFFF 와
+        // 미지정 잔재 0 이 둘 다 효과 있음으로 샜다. 판정 정본은 model::color 하나다.
+        || crate::model::color::char_shade(run.style.shade_color).is_some()
     {
         reasons.push("textVisualEffect");
     }
@@ -803,6 +837,8 @@ mod tests {
     use crate::renderer::render_tree::BoundingBox;
     use crate::renderer::{PathCommand, TextStyle};
 
+    const FIXTURE_TTC: &[u8] = include_bytes!("../../tests/fixtures/fonts/RHWPExactFaceSmoke.ttc");
+
     fn text_run(text: &str) -> TextRunNode {
         TextRunNode {
             text: text.to_string(),
@@ -826,19 +862,21 @@ mod tests {
             border_fill_id: 0,
             baseline: 12.0,
             field_marker: FieldMarkerType::None,
+            layout_positions: None,
+            display_text: None,
         }
     }
 
     fn text_op(text: &str) -> PaintOp {
-        PaintOp::TextRun {
-            bbox: BoundingBox::new(0.0, 0.0, 20.0, 20.0),
-            run: text_run(text),
-        }
+        PaintOp::text_run(BoundingBox::new(0.0, 0.0, 20.0, 20.0), text_run(text))
     }
 
     fn add_portable_font_resources(resources: &mut ResourceArena) {
-        let font_bytes = [0_u8, 1, 2, 3];
-        resources.intern_font_blob_bytes(&font_bytes);
+        add_portable_font_bytes(resources, FIXTURE_TTC, 0);
+    }
+
+    fn add_portable_font_bytes(resources: &mut ResourceArena, font_bytes: &[u8], face_index: u32) {
+        resources.intern_font_blob_bytes(font_bytes);
         let blob_key = FontBlobKey("blob-0".to_string());
         let face_key = FontFaceKey("face-0".to_string());
         let digest_value = resource_digest_hex(font_bytes);
@@ -860,7 +898,7 @@ mod tests {
         resources.font_resources_mut().faces.push(FontFaceResource {
             id: face_key,
             blob_key,
-            face_index: 0,
+            face_index,
             postscript_name: None,
             family_names: Vec::new(),
             style_names: Vec::new(),
@@ -961,7 +999,7 @@ mod tests {
                     flags: Vec::new(),
                 }],
                 direction: TextDirection::Ltr,
-                bidi_level: None,
+                bidi_level: Some(0),
                 writing_mode: WritingMode::HorizontalTb,
                 orientation: GlyphRunOrientation::Horizontal,
                 glyph_transforms: None,
@@ -1075,6 +1113,64 @@ mod tests {
     }
 
     #[test]
+    fn exact_collection_face_is_strict_only_when_the_face_exists() {
+        for (face_index, expected_reason) in [(1, None), (2, Some("faceIndexUnsupported"))] {
+            let mut tree = PageLayerTree::new(
+                100.0,
+                100.0,
+                LayerNode::leaf(
+                    BoundingBox::new(0.0, 0.0, 100.0, 100.0),
+                    None,
+                    vec![text_op("A"), glyph_op(None, 0)],
+                ),
+            );
+            add_portable_font_bytes(&mut tree.resources, FIXTURE_TTC, face_index);
+
+            let diagnostics = TextV2Diagnostics::from_layer_tree_with_profile(
+                &tree,
+                TextV2CompatibilityProfile::FallbackFreeStrict,
+            );
+            assert_eq!(diagnostics.has_errors(), expected_reason.is_some());
+            assert_eq!(
+                diagnostics.slot_diagnostics[0].fallback_reason.as_deref(),
+                expected_reason
+            );
+        }
+    }
+
+    #[test]
+    fn strict_font_proof_rejects_invalid_or_oversized_face_data() {
+        for (font_bytes, expected_reason) in [
+            (vec![0, 1, 2, 3], "faceIndexUnsupported"),
+            (
+                vec![0; MAX_PORTABLE_FONT_BLOB_BYTES + 1],
+                "fontBlobTooLarge",
+            ),
+        ] {
+            let mut tree = PageLayerTree::new(
+                100.0,
+                100.0,
+                LayerNode::leaf(
+                    BoundingBox::new(0.0, 0.0, 100.0, 100.0),
+                    None,
+                    vec![text_op("A"), glyph_op(None, 0)],
+                ),
+            );
+            add_portable_font_bytes(&mut tree.resources, &font_bytes, 0);
+
+            let diagnostics = TextV2Diagnostics::from_layer_tree_with_profile(
+                &tree,
+                TextV2CompatibilityProfile::FallbackFreeStrict,
+            );
+            assert!(diagnostics.has_errors());
+            assert_eq!(
+                diagnostics.slot_diagnostics[0].fallback_reason.as_deref(),
+                Some(expected_reason)
+            );
+        }
+    }
+
+    #[test]
     fn rejects_fallback_free_profile_without_font_resource_proof() {
         let tree = PageLayerTree::new(
             100.0,
@@ -1151,6 +1247,25 @@ mod tests {
         assert_eq!(
             diagnostics.slot_diagnostics[0].fallback_reason.as_deref(),
             Some("emptyGlyphOutline")
+        );
+    }
+
+    #[test]
+    fn resource_glyph_fallback_reason_is_not_masked_by_empty_paths() {
+        let mut op = glyph_outline_op();
+        let PaintOp::GlyphOutline { outline, .. } = &mut op else {
+            panic!("expected glyph outline");
+        };
+        outline.paths.clear();
+        outline.payload_kind = GlyphOutlinePayloadKind::BitmapGlyph;
+        assert_eq!(
+            glyph_outline_fallback_reason(outline).as_deref(),
+            Some("unsupportedBitmapGlyph")
+        );
+        outline.payload_kind = GlyphOutlinePayloadKind::SvgGlyph;
+        assert_eq!(
+            glyph_outline_fallback_reason(outline).as_deref(),
+            Some("unsupportedSvgGlyph")
         );
     }
 
@@ -1333,6 +1448,62 @@ mod tests {
     }
 
     #[test]
+    fn reports_p42_strict_shape_authority_as_pending() {
+        let cases: [(fn(&mut LayerGlyphRunPaint), &str); 6] = [
+            (
+                |run| run.shape_key.font_instance.synthetic_italic = true,
+                "syntheticStyleAuthorityPending",
+            ),
+            (
+                |run| run.direction = TextDirection::Rtl,
+                "bidiDirectionAuthorityPending",
+            ),
+            (
+                |run| run.shape_key.direction = TextDirection::Auto,
+                "bidiDirectionAuthorityPending",
+            ),
+            (|run| run.bidi_level = None, "bidiLevelAuthorityPending"),
+            (
+                |run| run.writing_mode = WritingMode::VerticalRl,
+                "writingModeAuthorityPending",
+            ),
+            (
+                |run| run.shape_key.writing_mode = WritingMode::VerticalLr,
+                "writingModeAuthorityPending",
+            ),
+        ];
+
+        for (mutate, expected_reason) in cases {
+            let mut op = glyph_op(None, 0);
+            let PaintOp::GlyphRun { run, .. } = &mut op else {
+                panic!("glyph_op must return a GlyphRun");
+            };
+            mutate(run);
+            let mut tree = PageLayerTree::new(
+                100.0,
+                100.0,
+                LayerNode::leaf(
+                    BoundingBox::new(0.0, 0.0, 100.0, 100.0),
+                    None,
+                    vec![text_op("A"), op],
+                ),
+            );
+            add_portable_font_resources(&mut tree.resources);
+            let diagnostics = TextV2Diagnostics::from_layer_tree_with_profile(
+                &tree,
+                TextV2CompatibilityProfile::FallbackFreeStrict,
+            );
+
+            assert!(diagnostics.has_errors());
+            assert!(!diagnostics.slot_diagnostics[0].strict_variant_available);
+            assert_eq!(
+                diagnostics.slot_diagnostics[0].fallback_reason.as_deref(),
+                Some(expected_reason)
+            );
+        }
+    }
+
+    #[test]
     fn producer_diagnostic_reason_takes_priority_over_authority_pending_reason() {
         let mut op = glyph_op(None, 1);
         if let PaintOp::GlyphRun { run, .. } = &mut op {
@@ -1458,10 +1629,10 @@ mod tests {
             LayerNode::leaf(
                 BoundingBox::new(0.0, 0.0, 100.0, 100.0),
                 None,
-                vec![PaintOp::TextRun {
-                    bbox: BoundingBox::new(0.0, 0.0, 20.0, 20.0),
+                vec![PaintOp::text_run(
+                    BoundingBox::new(0.0, 0.0, 20.0, 20.0),
                     run,
-                }],
+                )],
             ),
         );
         let diagnostics = TextV2Diagnostics::from_layer_tree(&tree);
@@ -1486,10 +1657,7 @@ mod tests {
                 BoundingBox::new(0.0, 0.0, 100.0, 100.0),
                 None,
                 vec![
-                    PaintOp::TextRun {
-                        bbox: BoundingBox::new(0.0, 0.0, 20.0, 20.0),
-                        run,
-                    },
+                    PaintOp::text_run(BoundingBox::new(0.0, 0.0, 20.0, 20.0), run),
                     glyph_op_for_text("A\tB", None, 0),
                 ],
             ),

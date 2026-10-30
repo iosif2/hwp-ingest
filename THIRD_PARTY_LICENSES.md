@@ -17,12 +17,12 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 
 기준 파일:
 
-- `Cargo.toml` / `Cargo.lock` (`rhwp` v0.7.13)
+- `Cargo.toml` / `Cargo.lock` (`rhwp` v0.8.7)
 - `rhwp-studio/package.json` / `rhwp-studio/package-lock.json`
 - `rhwp-chrome/package.json` / `rhwp-chrome/package-lock.json`
 - `rhwp-firefox/package.json` / `rhwp-firefox/package-lock.json`
 - `rhwp-vscode/package.json` / `rhwp-vscode/package-lock.json`
-- `web/fonts/FONTS.md`
+- `assets/fonts/FONTS.md`
 
 ---
 
@@ -32,41 +32,57 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 
 | 크레이트 | 버전 | 라이선스 | 저장소 | 비고 |
 |---------|------|---------|--------|------|
-| base64 | 0.22.1 | MIT OR Apache-2.0 | marshallpierce/rust-base64 | Base64 인코딩 |
-| blake3 | 1.8.5 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | BLAKE3-team/BLAKE3 | 해시/진단 |
+| aes | 0.9.2 | MIT OR Apache-2.0 | RustCrypto/block-ciphers | HWPX 암호화 |
+| base64 | 0.23.1 | MIT OR Apache-2.0 | marshallpierce/rust-base64 | Base64 인코딩 |
+| blake3 | 1.8.6 | CC0-1.0 OR Apache-2.0 OR Apache-2.0 WITH LLVM-exception | BLAKE3-team/BLAKE3 | 해시/진단 |
 | byteorder | 1.5.0 | Unlicense OR MIT | BurntSushi/byteorder | 바이너리 endian 처리 |
+| cbc | 0.2.1 | MIT OR Apache-2.0 | RustCrypto/block-modes | HWPX 암호화 모드 |
 | cfb | 0.14.0 | MIT | mdsteele/rust-cfb | OLE Compound File |
+| cipher | 0.5.2 | MIT OR Apache-2.0 | RustCrypto/traits | 암호 trait |
 | codepage | 0.1.2 | Apache-2.0 OR MIT | hsivonen/codepage | 코드페이지 처리 |
 | console_error_panic_hook | 0.1.7 | Apache-2.0/MIT | rustwasm/console_error_panic_hook | WASM panic hook |
+| crc32fast | 1.5.0 | MIT OR Apache-2.0 | srijs/rust-crc32fast | HWP3 암호 키 검증 |
+| des | 0.9.0 | MIT OR Apache-2.0 | RustCrypto/block-ciphers | HWP3 암호화 |
+| ed25519-dalek | 2.2.0 | BSD-3-Clause | dalek-cryptography/curve25519-dalek | capsule 서명 |
 | embedded-io | 0.7.1 | MIT OR Apache-2.0 | rust-embedded/embedded-hal | IO trait |
 | encoding_rs | 0.8.35 | (Apache-2.0 OR MIT) AND BSD-3-Clause | hsivonen/encoding_rs | 문자 인코딩 |
 | flate2 | 1.1.9 | MIT OR Apache-2.0 | rust-lang/flate2-rs | 압축/해제 |
+| getrandom | 0.4.3 | MIT OR Apache-2.0 | rust-random/getrandom | 서명 키 난수 생성 |
+| hmac | 0.13.0 | MIT OR Apache-2.0 | RustCrypto/MACs | HWPX 무결성 |
 | image | 0.25.10 | MIT OR Apache-2.0 | image-rs/image | BMP/JPEG/PNG 디코딩 |
-| js-sys | 0.3.85 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | WASM JS interop |
+| js-sys | 0.3.102 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | WASM JS interop |
 | paste | 1.0.15 | MIT OR Apache-2.0 | dtolnay/paste | 매크로 보조 |
+| pbkdf2 | 0.13.0 | MIT OR Apache-2.0 | RustCrypto/password-hashes | HWPX 키 파생 |
 | pcx | 0.2.5 | MIT OR Apache-2.0 OR WTFPL | kryptan/pcx | PCX 이미지 디코딩 |
 | pdf-writer | 0.12.1 | MIT OR Apache-2.0 | typst/pdf-writer | PDF 출력 |
-| quick-xml | 0.40.1 | MIT | tafia/quick-xml | HWPX XML 파싱 |
+| quick-xml | 0.41.0 | MIT | tafia/quick-xml | HWPX XML 파싱 |
 | resvg | 0.47.0 | Apache-2.0 OR MIT | linebender/resvg | native-skia SVG raster (optional) |
-| serde | 1.0.228 | MIT OR Apache-2.0 | serde-rs/serde | 직렬화 |
-| serde_json | 1.0.149 | MIT OR Apache-2.0 | serde-rs/json | JSON 직렬화 |
-| skia-safe | 0.97.0 | MIT | rust-skia/rust-skia | native-skia PNG/PDF backend (optional) |
-| snafu | 0.9.0 | MIT OR Apache-2.0 | shepmaster/snafu | 에러 처리 |
+| roxmltree | 0.21.1 | MIT OR Apache-2.0 | RazrFalcon/roxmltree | XML 검증·정규화 |
+| serde | 1.0.229 | MIT OR Apache-2.0 | serde-rs/serde | 직렬화 |
+| serde_json | 1.0.151 | MIT OR Apache-2.0 | serde-rs/json | JSON 직렬화 |
+| sha1 | 0.11.0 | MIT OR Apache-2.0 | RustCrypto/hashes | HWPX 암호 키 파생 |
+| sha2 | 0.11.0 | MIT OR Apache-2.0 | RustCrypto/hashes | 서명·CAS 해시 |
+| skia-safe | 0.99.0 | MIT | rust-skia/rust-skia | native-skia PNG/PDF backend (optional) |
+| snafu | 0.9.2 | MIT OR Apache-2.0 | shepmaster/snafu | 에러 처리 |
 | strum | 0.28.0 | MIT | Peternator7/strum | enum derive |
-| subsetter | 0.2.3 | MIT OR Apache-2.0 | typst/subsetter | 폰트 subset |
+| subsecond | 0.7.10 | MIT OR Apache-2.0 | DioxusLabs/dioxus | 개발 핫패치 (optional) |
+| subsetter | 0.2.6 | MIT OR Apache-2.0 | typst/subsetter | 폰트 subset |
 | svg2pdf | 0.13.0 | MIT OR Apache-2.0 | typst/svg2pdf | SVG → PDF |
+| svgtypes | 0.16.1 | Apache-2.0 OR MIT | linebender/svgtypes | SVG 값 파싱 |
 | ttf-parser | 0.25.1 | MIT OR Apache-2.0 | harfbuzz/ttf-parser | 폰트 파싱 |
-| unicode-segmentation | 1.12.0 | MIT OR Apache-2.0 | unicode-rs/unicode-segmentation | grapheme/word segmentation |
+| unicode-properties | 0.1.4 | MIT OR Apache-2.0 | unicode-rs/unicode-properties | 유니코드 문자 분류 |
+| unicode-segmentation | 1.13.3 | MIT OR Apache-2.0 | unicode-rs/unicode-segmentation | grapheme/word segmentation |
 | unicode-width | 0.2.2 | MIT OR Apache-2.0 | unicode-rs/unicode-width | 문자 폭 계산 |
 | usvg | 0.45.1 | Apache-2.0 OR MIT | linebender/resvg | SVG 파싱 |
-| wasm-bindgen | 0.2.108 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | WASM binding |
-| wasm-bindgen-test | 0.3.58 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | WASM 테스트 |
-| web-sys | 0.3.85 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | Web API binding |
-| zip | 8.5.1 | MIT | zip-rs/zip2 | HWPX ZIP 처리 |
+| wasm-bindgen | 0.2.125 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | WASM binding |
+| wasm-bindgen-test | 0.3.75 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | WASM 테스트 |
+| web-sys | 0.3.102 | MIT OR Apache-2.0 | rustwasm/wasm-bindgen | Web API binding |
+| zip | 8.6.0 | MIT | zip-rs/zip2 | HWPX ZIP 처리 |
 
 ### 전체 Rust 의존성 요약
 
-`Cargo.lock` 기준 package entry는 192개이며, 이 중 root package `rhwp`를 제외한 외부 Rust 크레이트는 191개다.
+`cargo metadata --locked` 기준 package entry는 247개이며, 그중 registry 또는 Git
+source를 가진 외부 Rust 크레이트는 243개다. 나머지 4개는 현재 workspace 패키지다.
 
 주요 라이선스군:
 
@@ -93,18 +109,21 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 
 | 패키지 | 버전 | 라이선스 | 용도 |
 |--------|------|---------|------|
-| @rhwp/core | 0.7.13 | MIT | WASM parser/renderer API |
-| @rhwp/editor | 0.7.13 | MIT | iframe 기반 웹 에디터 wrapper |
+| @rhwp/core | 0.8.6 | MIT | WASM parser/renderer API |
+| @rhwp/editor | 0.8.6 | MIT | iframe 기반 웹 에디터 wrapper |
 
 ### rhwp-studio
 
 | 패키지 | Lock 버전 | 라이선스 | 용도 |
 |--------|-----------|---------|------|
-| canvaskit-wasm | 0.41.1 | BSD-3-Clause | CanvasKit 렌더링 backend |
-| @types/chrome | 0.1.42 | MIT | Chrome API 타입 |
-| puppeteer-core | 25.0.4 | Apache-2.0 | E2E 테스트 / CDP 연결 |
-| typescript | 6.0.3 | Apache-2.0 | TypeScript 컴파일 |
-| vite | 8.0.14 | MIT | 개발 서버 + 빌드 |
+| canvaskit-wasm | 0.42.0 | BSD-3-Clause | CanvasKit 렌더링 backend |
+| @noble/hashes | 2.4.0 | MIT | 렌더 리소스 키와 문서 digest |
+| @types/chrome | 0.2.5 | MIT | Chrome API 타입 |
+| pixelmatch | 7.2.0 | ISC | 시각 diff 픽셀 비교 |
+| pngjs | 7.0.0 | MIT | 시각 diff PNG 처리 |
+| puppeteer-core | 25.5.0 | Apache-2.0 | E2E 테스트 / CDP 연결 |
+| typescript | 7.0.2 | Apache-2.0 | TypeScript 컴파일 |
+| vite | 8.2.1 | MIT | 개발 서버 + 빌드 |
 | vite-plugin-pwa | 1.3.0 | MIT | PWA 빌드 보조 |
 | workbox-window | 7.4.1 | MIT | Service worker runtime 보조 |
 
@@ -112,21 +131,24 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 
 | 패키지 | Lock 버전 | 라이선스 | 용도 |
 |--------|-----------|---------|------|
-| typescript | 5.9.3 | Apache-2.0 | TypeScript 컴파일 |
-| vite | 6.4.2 | MIT | 확장 번들 빌드 |
+| typescript | 7.0.2 | Apache-2.0 | TypeScript 컴파일 |
+| vite | 8.2.1 | MIT | 확장 번들 빌드 |
 
 ### rhwp-vscode
 
 | 패키지 | Lock 버전 | 라이선스 | 용도 |
 |--------|-----------|---------|------|
-| @types/node | 20.19.37 | MIT | Node.js 타입 |
-| @types/vscode | 1.110.0 | MIT | VS Code API 타입 |
+| @types/node | 18.15.13 | MIT | Node.js 타입 |
+| @types/vscode | 1.82.0 | MIT | VS Code API 타입 |
+| @typescript/native | 7.0.2 | Apache-2.0 | TypeScript native preview 컴파일러 |
 | copy-webpack-plugin | 14.0.0 | MIT | Webpack 파일 복사 |
 | null-loader | 4.0.1 | MIT | Webpack 로더 |
-| ts-loader | 9.5.4 | MIT | Webpack TypeScript 로더 |
-| typescript | 5.9.3 | Apache-2.0 | TypeScript 컴파일 |
-| webpack | 5.105.4 | MIT | 번들러 |
-| webpack-cli | 6.0.1 | MIT | Webpack CLI |
+| ts-loader | 9.6.2 | MIT | Webpack TypeScript 로더 |
+| typescript | 6.0.2 | Apache-2.0 | TypeScript 컴파일 |
+| webpack | 5.109.2 | MIT | 번들러 |
+| webpack-cli | 7.2.2 | MIT | Webpack CLI |
+| @noble/hashes | 2.4.0 | MIT | 문서 digest |
+| canvaskit-wasm | 0.42.0 | BSD-3-Clause | 자동 선택 CanvasKit backend |
 
 ### rhwp-shared
 
@@ -136,14 +158,14 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 
 ## 웹 폰트 및 폰트 리소스
 
-`web/fonts/`에 포함된 폰트 목록이다. 저작권 보호가 필요한 한컴/Microsoft 폰트는 Git에 포함하지 않으며,
-세부 파일 목록과 폴백 관계는 `web/fonts/FONTS.md`를 참조한다.
+`assets/fonts/`에 포함된 canonical 폰트 목록이다. 저작권 보호가 필요한 한컴/Microsoft 폰트는 Git에
+포함하지 않으며, 세부 파일 목록과 폴백 관계는 `assets/fonts/FONTS.md`를 참조한다.
 
 | 폰트/리소스 | 라이선스 | 출처 | 비고 |
 |-------------|---------|------|------|
 | Pretendard (9종) | SIL Open Font License 1.1 | github.com/orioncactus/pretendard | Sans-serif fallback |
 | Noto Serif KR (2종) | SIL Open Font License 1.1 | Google Fonts | Serif fallback |
-| Noto Sans KR (2종) | SIL Open Font License 1.1 | Google Fonts | Sans-serif fallback |
+| Noto Sans KR (3종) | SIL Open Font License 1.1 | Google Fonts | Sans-serif fallback |
 | Nanum Myeongjo (3종) | SIL Open Font License 1.1 | Google Fonts | Serif fallback |
 | Nanum Gothic (3종) | SIL Open Font License 1.1 | Google Fonts | Sans-serif fallback |
 | Nanum Gothic Coding (2종) | SIL Open Font License 1.1 | Google Fonts | Monospace fallback |
@@ -171,6 +193,48 @@ rhwp 프로젝트가 사용하는 서드파티 라이브러리 및 리소스의 
 
 ---
 
+## 직접 포팅한 알고리즘
+
+### Volexity hwp-extract
+
+- 출처: [volexity/hwp-extract](https://github.com/volexity/hwp-extract), commit
+  `e5f8b5e1590dee973630666e687e919fa70da2e2`
+- 참조 파일: `src/hwp_extract/encrypt.py`
+- 적용 위치: `src/parser/crypto.rs`의 HWP5 EncryptVersion 4 키 파생 및 비트 단위
+  AES-CFB 복호화
+- 라이선스: BSD-3-Clause
+
+Modified BSD License
+
+_Copyright © `2024`, `Volexity, Inc`_
+
+_All rights reserved._
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. Neither the name of the `Volexity, Inc` nor the
+   names of its contributors may be used to endorse or promote products
+   derived from this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS “AS IS” AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL `Volexity, Inc` BE LIABLE FOR ANY
+DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+---
+
 ## 참조한 오픈소스 프로젝트 (스펙·설계 참조)
 
 rhwp는 아래 프로젝트들의 **코드를 직접 복사하지 않으며**, 공개된 스펙 정보(enum 값·속성 기본값·태그 이름·검증 규칙 등)만 참조한다.
@@ -191,8 +255,24 @@ rhwp는 **MIT 라이선스**로 배포된다.
 - `encoding_rs`의 BSD-3-Clause 조항은 고지 의무를 요구하며, 이 문서로 충족
 - `pcx`는 WTFPL 대체 선택지를 포함하지만 MIT/Apache-2.0 선택지가 있어 rhwp MIT 배포와 호환
 - 오픈 폰트는 SIL OFL 1.1 또는 GUST Font License 등 재배포 가능한 라이선스만 Git에 포함
-- 저작권 보호 대상 폰트(한컴, Microsoft 등)는 Git에 포함하지 않으며 `ttfs/FONTS.md`, `web/fonts/FONTS.md`에서 목록과 폴백만 관리
+- 저작권 보호 대상 폰트(한컴, Microsoft 등)는 Git에 포함하지 않으며 `ttfs/FONTS.md`, `assets/fonts/FONTS.md`에서 목록과 폴백만 관리
 
 ---
 
-*이 문서는 `Cargo.toml`, `Cargo.lock`, 각 `package.json`/`package-lock.json`, `web/fonts/FONTS.md` 기준으로 현행화되었으며, 의존성 업데이트 시 함께 갱신해야 한다.*
+*이 문서는 `Cargo.toml`, `Cargo.lock`, 각 `package.json`/`package-lock.json`, `assets/fonts/FONTS.md` 기준으로 현행화되었으며, 의존성 업데이트 시 함께 갱신해야 한다.*
+
+---
+
+# Supplemental notice added by hwp-ingest
+
+The upstream rhwp v0.8.7 notice above does not list the following direct Rust dependencies of the vendored crate, although they are compiled into hwp-ingest. The table was produced from `cargo metadata` on hwp-ingest's `Cargo.lock` (resolved versions and the SPDX `license` fields declared by each crate). The `rhwp-contracts`, `rhwp-ooxml-chart`, and `rhwp-password-crypto` crates under `vendor/rhwp-subset/crates` are part of rhwp and covered by its MIT license (`licenses/rhwp-MIT.txt`).
+
+| Crate | Version | License | Repository |
+|-------|---------|---------|------------|
+| argon2 | 0.6.0 | MIT OR Apache-2.0 | RustCrypto/password-hashes |
+| chacha20poly1305 | 0.11.0 | Apache-2.0 OR MIT | RustCrypto/AEADs |
+| ml-dsa | 0.1.1 | Apache-2.0 OR MIT | RustCrypto/signatures |
+| ml-kem | 0.3.3 | Apache-2.0 OR MIT | RustCrypto/KEMs |
+| rand_core | 0.10.1 | MIT OR Apache-2.0 | rust-random/rand_core |
+| rustybuzz | 0.20.1 | MIT | harfbuzz/rustybuzz |
+| zeroize | 1.9.1 | Apache-2.0 OR MIT | RustCrypto/utils |
