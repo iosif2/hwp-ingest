@@ -44,9 +44,9 @@ fn core_error_to_py(error: CoreError) -> PyErr {
         CoreError::Io { source, .. } if source.kind() == ErrorKind::AlreadyExists => {
             PyFileExistsError::new_err(error.to_string())
         }
-        CoreError::PageOutOfRange { .. } | CoreError::EmptyDocument => {
-            PyValueError::new_err(error.to_string())
-        }
+        CoreError::PageOutOfRange { .. }
+        | CoreError::EmptyDocument
+        | CoreError::InvalidPageRange { .. } => PyValueError::new_err(error.to_string()),
         CoreError::Io { .. } | CoreError::Parse(_) | CoreError::Render(_) => {
             HwpIngestError::new_err(error.to_string())
         }

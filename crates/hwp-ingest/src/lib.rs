@@ -6,6 +6,14 @@ use std::path::{Path, PathBuf};
 
 use hwp_ingest_rhwp_adapter::RhwpAdapterError;
 
+mod text;
+
+pub use text::{
+    DocumentStatus, EXTRACTION_VERSION, MAX_PAGE_SPAN, PageSelection, PageStatus, PageText,
+    PaginationBasis, Provenance, SourceFormat, SourceIdentity, TextExtraction, TextOptions,
+    extract_text_bytes, extract_text_file,
+};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ConvertOptions {
     pub page_index: Option<u32>,
@@ -44,6 +52,11 @@ pub enum HwpIngestError {
         requested: u32,
         page_count: u32,
     },
+    /// A text page range that is empty, inverted, or wider than [`MAX_PAGE_SPAN`].
+    InvalidPageRange {
+        start: u32,
+        end: u32,
+    },
 }
 
 impl fmt::Display for HwpIngestError {
@@ -62,6 +75,10 @@ impl fmt::Display for HwpIngestError {
                 f,
                 "page index {requested} is out of range for document with {page_count} pages"
             ),
+            Self::InvalidPageRange { start, end } => write!(
+                f,
+                "page range [{start}, {end}) is empty, inverted, or wider than {MAX_PAGE_SPAN} pages"
+            ),
         }
     }
 }
@@ -73,7 +90,8 @@ impl Error for HwpIngestError {
             Self::Parse(_)
             | Self::Render(_)
             | Self::EmptyDocument
-            | Self::PageOutOfRange { .. } => None,
+            | Self::PageOutOfRange { .. }
+            | Self::InvalidPageRange { .. } => None,
         }
     }
 }
