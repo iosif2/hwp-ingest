@@ -20,6 +20,19 @@ pub struct ConvertOptions {
     pub omit_header_footer: bool,
 }
 
+/// Fonts for PDF output beyond the ones installed on the system.
+///
+/// The system's fonts are used first. If a document's font is missing everywhere, the glyphs come
+/// from `font_dirs` and finally from a Korean font embedded in hwp-ingest, so Hangul is not left as
+/// missing-glyph boxes. The embedded font covers Hangul only: Hanja, circled digits, many symbols,
+/// and Hancom private-use symbols need a system font or a directory listed here. SVG output is not
+/// affected, because SVG cannot carry fonts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FontOptions {
+    /// Directories scanned for fonts, in addition to the system fonts.
+    pub font_dirs: Vec<PathBuf>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DocumentInfo {
     pub page_count: u32,
@@ -114,6 +127,12 @@ impl From<RhwpAdapterError> for HwpIngestError {
     }
 }
 
+fn adapter_font_options(fonts: &FontOptions) -> hwp_ingest_rhwp_adapter::PdfFontOptions {
+    hwp_ingest_rhwp_adapter::PdfFontOptions {
+        font_dirs: fonts.font_dirs.clone(),
+    }
+}
+
 fn adapter_render_options(options: ConvertOptions) -> hwp_ingest_rhwp_adapter::RenderOptions {
     hwp_ingest_rhwp_adapter::RenderOptions {
         page_index: options.page_index,
@@ -130,8 +149,20 @@ pub fn analyze_hwp_bytes(data: &[u8]) -> Result<DocumentInfo, HwpIngestError> {
 }
 
 pub fn hwp_to_pdf_bytes(data: &[u8], options: ConvertOptions) -> Result<Vec<u8>, HwpIngestError> {
-    hwp_ingest_rhwp_adapter::hwp_to_pdf_bytes(data, adapter_render_options(options))
-        .map_err(Into::into)
+    hwp_to_pdf_bytes_with_fonts(data, options, &FontOptions::default())
+}
+
+pub fn hwp_to_pdf_bytes_with_fonts(
+    data: &[u8],
+    options: ConvertOptions,
+    fonts: &FontOptions,
+) -> Result<Vec<u8>, HwpIngestError> {
+    hwp_ingest_rhwp_adapter::hwp_to_pdf_bytes_with_fonts(
+        data,
+        adapter_render_options(options),
+        &adapter_font_options(fonts),
+    )
+    .map_err(Into::into)
 }
 
 pub fn hwp_to_svg_pages(
@@ -154,6 +185,15 @@ pub fn hwp_file_to_pdf_file(
     output_path: impl AsRef<Path>,
     options: ConvertOptions,
 ) -> Result<ConvertReport, HwpIngestError> {
+    hwp_file_to_pdf_file_with_fonts(input_path, output_path, options, &FontOptions::default())
+}
+
+pub fn hwp_file_to_pdf_file_with_fonts(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    options: ConvertOptions,
+    fonts: &FontOptions,
+) -> Result<ConvertReport, HwpIngestError> {
     let input_path = input_path.as_ref();
     let output_path = output_path.as_ref();
     let data = std::fs::read(input_path).map_err(|source| HwpIngestError::Io {
@@ -162,7 +202,7 @@ pub fn hwp_file_to_pdf_file(
     })?;
 
     let info = analyze_hwp_bytes(&data)?;
-    let pdf = hwp_to_pdf_bytes(&data, options)?;
+    let pdf = hwp_to_pdf_bytes_with_fonts(&data, options, fonts)?;
 
     if let Some(parent) = output_path.parent() {
         if !parent.as_os_str().is_empty() {

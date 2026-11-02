@@ -1,3 +1,4 @@
+from collections.abc import Sequence
 from os import PathLike
 from pathlib import Path
 
@@ -35,6 +36,7 @@ def to_pdf_bytes(
     *,
     page_index: int | None = None,
     omit_header_footer: bool = False,
+    font_dirs: Sequence[str | PathLike[str]] | None = None,
 ) -> bytes:
     """Convert HWP document bytes into PDF bytes."""
     ...
@@ -57,6 +59,7 @@ def to_pdf_file(
     page_index: int | None = None,
     overwrite: bool = False,
     omit_header_footer: bool = False,
+    font_dirs: Sequence[str | PathLike[str]] | None = None,
 ) -> Path:
     """Convert an HWP file into a PDF file and return the created path."""
     ...
