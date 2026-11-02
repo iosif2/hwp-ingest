@@ -31,6 +31,28 @@ hwp_file_to_pdf_file(input_path, output_path, options)
 
 미래 batch API와 semantic API는 Rust engine crate에서 먼저 설계하고 구현한 뒤 PyO3 wrapper와 Python facade/stub으로 올라와야 한다. 현재 구현 위치는 `hwp-ingest`다. `rhwp` 고유 구조는 `hwp-ingest-rhwp-adapter`가 흡수한다. Python-only 확장으로 Rust engine이 생산하지 않는 semantic contract를 만들지 않는다.
 
+## Public API added after the MVP
+
+위 "Current MVP API"는 처음 구현한 PDF 세 함수만 적은 원문이다. 이후 다음 API가 추가되었고, 모두 Rust engine에서 먼저 설계한 뒤 PyO3와 Python facade/stub으로 올라왔다.
+
+```python
+# SVG page artifacts (docs/svg-artifact-api-decision.md)
+to_svg_pages(data: bytes, *, page_index: int | None = None, omit_header_footer: bool = False) -> list[bytes]
+to_svg_files(input_path, output_dir=None, *, page_index=None, overwrite=False, omit_header_footer=False) -> list[Path]
+
+# Page-range text extraction (docs/text-extraction-api-decision.md)
+extract_text_bytes(data: bytes, *, pages: range | None = None, omit_header_footer: bool = False) -> TextExtraction
+extract_text_file(input_path, *, pages: range | None = None, omit_header_footer: bool = False) -> TextExtraction
+
+# PDF font directories (docs/pdf-backend-policy.md, "Font policy")
+to_pdf_bytes(data, *, page_index=None, omit_header_footer=False, font_dirs=None) -> bytes
+to_pdf_file(input_path, output_path=None, *, page_index=None, overwrite=False, omit_header_footer=False, font_dirs=None) -> Path
+```
+
+Rust engine에는 대응하는 `hwp_to_svg_pages`, `hwp_file_to_svg_files`, `extract_text_bytes`, `extract_text_file`, `hwp_to_pdf_bytes_with_fonts`, `hwp_file_to_pdf_file_with_fonts`가 있다. `ConvertOptions`는 `Copy`로 유지하므로 폰트 옵션은 별도 `FontOptions`로 받고, 기존 PDF 함수는 기본 옵션으로 위임한다.
+
+텍스트 추출 결과는 문서 상태와 페이지별 상태를 값으로 돌려주는 compact result이며 `rhwp` 내부 상태를 노출하지 않는다. 출처 정보(입력 해시, 페이지 인덱스, 아티팩트 키, 추출·엔진·rhwp 버전)가 결과에 포함된다.
+
 ## Rust library and batch engine direction
 
 다른 Rust service는 Python 없이 `hwp-ingest` engine crate에 의존해 고성능 HWP/HWPX ingestion, rendered output generation, semantic artifact pipeline을 만들 수 있어야 한다. 현재 Rust MVP 사용 shape는 다음과 같다.
