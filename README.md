@@ -22,6 +22,7 @@
 - Convert HWP files to PDF bytes or PDF files. When the system has no Korean font, Hangul falls back to a bundled open-licensed font instead of turning into empty boxes.
 - Render page-level SVG artifacts for inspection and downstream pipelines.
 - Read basic document metadata such as renderable page count.
+- Extract the text of a page range, the first page included, from HWP and HWPX, with an explicit status for every page and for documents that cannot be read.
 - Keep conversion orchestration in Rust while Python handles paths, overwrite policy, and typed facade ergonomics.
 
 Install from PyPI:
@@ -183,6 +184,25 @@ svg_pages = hwp_ingest.to_svg_pages(Path("document.hwp").read_bytes())
 Path("page-1.svg").write_bytes(svg_pages[0])
 ```
 
+Extract the text of the first page (zero-based, half-open page range):
+
+```python
+from pathlib import Path
+
+import hwp_ingest
+
+result = hwp_ingest.extract_text_file(
+    Path("document.hwp"),
+    pages=range(0, 1),
+    omit_header_footer=True,
+)
+if result.is_ready and result.pages[0].status == "text":
+    first_page_text = result.pages[0].text
+else:
+    # Not an error: continue with the file name or post title instead.
+    print(result.document_status, [page.status for page in result.pages])
+```
+
 Read basic document metadata:
 
 ```python
@@ -262,9 +282,75 @@ filenames are stable and use one-based visible page numbers:
 `<stem>.page-0001.svg`, `<stem>.page-0002.svg`, and so on. Existing output
 files are protected unless `overwrite=True`.
 
+```python
+hwp_ingest.extract_text_bytes(
+    data: bytes,
+    *,
+    pages: range | None = None,
+    omit_header_footer: bool = False,
+) -> hwp_ingest.TextExtraction
+
+hwp_ingest.extract_text_file(
+    input_path: str | os.PathLike[str],
+    *,
+    pages: range | None = None,
+    omit_header_footer: bool = False,
+) -> hwp_ingest.TextExtraction
+```
+
+Extracts page text from HWP 5.0, HWPX, and HWP 3.0 documents. `pages` is a
+zero-based, half-open `range`: `range(0, 1)` is the first page, `range(1, 3)`
+the second and third. Pass `None` for the whole document. A range may span at
+most 4096 pages. `omit_header_footer=True` leaves header and footer text out of
+every page.
+
+A document that cannot be read is **not** an exception. The result says why in
+`document_status`, and then `pages` is empty and no text of any kind is
+returned: there is never a document excerpt standing in for a page.
+
+| `document_status` | Meaning |
+| --- | --- |
+| `READY` | The document opened and its pages were computed. |
+| `UNSUPPORTED_FORMAT` | Not a document format hwp-ingest reads. |
+| `DRM_PROTECTED` | Protected by a DRM container. |
+| `PASSWORD_REQUIRED` | Needs a password (opening with a password is not supported). |
+| `EMPTY_INPUT` | Zero bytes. |
+| `UNPARSABLE` | A known format that could not be read; see `document_status_detail`. |
+| `TOO_LARGE` | Input over the size limit (256 MB). |
+| `PAGE_BOUNDARY_UNSUPPORTED` | HML opens but its page boundaries are unverified, so no text is returned. |
+| `NO_PAGES` | The document opened with zero pages. |
+
+Each entry of `result.pages` has a `page_index`, a `status`, the `text`, and a
+stable `artifact_key`. Pages past the end of the document stay in the list as
+`out_of_range` instead of failing the request.
+
+| `status` | Meaning |
+| --- | --- |
+| `text` | The page has text. |
+| `no_text` | The page was read and has no text, for example an image-only page. This is common and not a failure. |
+| `extraction_failed` | Extracting this page failed; see `status_detail`. |
+| `out_of_range` | The page is past the end of the document. |
+
+The result also records where it came from: `source_sha256`, `source_size_bytes`,
+`source_format`, `source_file_name` (file API only), `page_count`, and the
+`extraction_version`, `engine_version`, and `rhwp_version` that produced it.
+`pagination` is always `"computed"`: HWP and HWPX do not store page boundaries,
+so pages are computed by the layout engine and can differ from the pages
+Hancom Office shows, mostly by a page or so late in long documents. Treat page
+numbers as an estimate, not a guarantee.
+
+What to expect from the text itself: equations come out as their equation
+script, circled digits such as ① stay as they are, table text is included, and
+object placeholders (`U+FFFC`) are removed. Header and footer text is included
+unless you pass `omit_header_footer=True`. A damaged file can still open
+without any error, so a `READY` result does not prove the file was intact.
+
 ### Errors
 
 - `ValueError`: negative `page_index`, empty documents, or out-of-range pages.
+  `hwp_ingest.InvalidPageRangeError` (a `ValueError`): the text extraction range
+  is empty, inverted, or wider than 4096 pages. Other `pages` mistakes raise
+  `TypeError` (not a `range`) or `ValueError` (step other than 1, negative).
 - `FileExistsError`: output exists and `overwrite=False`.
 - `FileNotFoundError`: input file path does not exist, or a `font_dirs` entry
   does not exist. `NotADirectoryError`: a `font_dirs` entry is not a directory.
