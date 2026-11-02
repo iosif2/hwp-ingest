@@ -19,7 +19,7 @@
 
 ## Features
 
-- Convert HWP files to PDF bytes or PDF files.
+- Convert HWP files to PDF bytes or PDF files. When the system has no Korean font, Hangul falls back to a bundled open-licensed font instead of turning into empty boxes.
 - Render page-level SVG artifacts for inspection and downstream pipelines.
 - Read basic document metadata such as renderable page count.
 - Keep conversion orchestration in Rust while Python handles paths, overwrite policy, and typed facade ergonomics.
@@ -65,6 +65,34 @@ On Windows, install librsvg/rsvg-convert and ensure `rsvg-convert.exe` is on
 `hwp_ingest.HwpIngestError` with a clear message. `svg2pdf` is not used as an
 automatic fallback because it is known to drop clipped table text in some HWP
 documents.
+
+## Fallback font for Hangul
+
+PDF conversion first uses the fonts installed on the system. If a document's
+font is missing and the system has no Korean font at all, `hwp-ingest` falls
+back to a bundled Noto Sans KR Regular subset (SIL Open Font License 1.1, see
+`licenses/NotoSansKR-OFL.txt`) so Hangul is rendered instead of missing-glyph
+boxes. Fonts you pass with `font_dirs` and the system fonts take precedence
+over the bundled one.
+
+```python
+hwp_ingest.to_pdf_bytes(data, font_dirs=["/opt/company-fonts"])
+```
+
+The bundled font covers Hangul and Latin only. It does **not** cover Hanja,
+circled digits such as ①, fullwidth symbols, most arrows and math symbols, or
+Hancom private-use symbols, and it is a single regular-weight sans-serif face:
+serif (Myeongjo/Batang) text is drawn in that sans-serif face and bold is
+synthesized. For those characters
+install a full CJK font on the machine or pass a directory with `font_dirs`:
+
+```sh
+# Debian/Ubuntu: full Korean/CJK coverage including Hanja
+sudo apt-get install fonts-noto-cjk
+```
+
+SVG output cannot carry fonts, so whatever displays the SVG needs its own
+Korean font. The fallback only applies to PDF output.
 
 ## Font fallback and PUA glyphs
 
@@ -112,7 +140,9 @@ cp HCRBatang.ttf HCRBatang-Bold.ttf ~/.local/share/fonts/hancom/
 fc-cache -f ~/.local/share/fonts/hancom
 ```
 
-Do not commit restricted font files into this repository.
+Do not commit restricted font files into this repository. The only font
+bundled is the redistributable Noto Sans KR subset described above; Hancom and
+Microsoft fonts are never bundled.
 
 ## Quick start
 
@@ -180,11 +210,14 @@ hwp_ingest.to_pdf_bytes(
     data: bytes,
     *,
     page_index: int | None = None,
+    font_dirs: Sequence[str | os.PathLike[str]] | None = None,
 ) -> bytes
 ```
 
 Returns PDF bytes. `page_index` is zero-based. Pass `None` to convert the full
-document.
+document. `font_dirs` lists extra directories to search for fonts (see
+[Fallback font for Hangul](#fallback-font-for-hangul)); pass a sequence of
+paths, not a single path.
 
 ```python
 hwp_ingest.to_svg_pages(
@@ -205,6 +238,7 @@ hwp_ingest.to_pdf_file(
     *,
     page_index: int | None = None,
     overwrite: bool = False,
+    font_dirs: Sequence[str | os.PathLike[str]] | None = None,
 ) -> pathlib.Path
 ```
 
@@ -232,7 +266,9 @@ files are protected unless `overwrite=True`.
 
 - `ValueError`: negative `page_index`, empty documents, or out-of-range pages.
 - `FileExistsError`: output exists and `overwrite=False`.
-- `FileNotFoundError`: input file path does not exist.
+- `FileNotFoundError`: input file path does not exist, or a `font_dirs` entry
+  does not exist. `NotADirectoryError`: a `font_dirs` entry is not a directory.
+  `TypeError`: `font_dirs` is a single path instead of a sequence.
 - `hwp_ingest.HwpIngestError`: parse, render, PDF backend, or output write
   failures.
 
