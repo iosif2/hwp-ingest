@@ -1048,7 +1048,7 @@ dependencies = [
 
 [[package]]
 name = "hwp-ingest"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "hwp-ingest-rhwp-adapter",
  "sha2",
@@ -1056,7 +1056,7 @@ dependencies = [
 
 [[package]]
 name = "hwp-ingest-python"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "hwp-ingest",
  "pyo3",
@@ -1064,7 +1064,7 @@ dependencies = [
 
 [[package]]
 name = "hwp-ingest-rhwp-adapter"
-version = "0.1.2"
+version = "0.2.0"
 dependencies = [
  "rhwp",
  "sha2",
