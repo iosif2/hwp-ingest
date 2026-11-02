@@ -11,3 +11,6 @@ path = "src/lib.rs"
 
 [dependencies]
 rhwp.workspace = true
+
+[dev-dependencies]
+sha2 = "0.11"

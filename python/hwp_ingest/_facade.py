@@ -1,5 +1,6 @@
 """Pythonic facade for the native hwp-ingest extension."""
 
+from collections.abc import Sequence
 from os import PathLike
 from pathlib import Path
 
@@ -20,6 +21,29 @@ def _validate_page_index(page_index: int | None) -> int | None:
 
 
 _MAX_PAGE_INDEX = 2**32 - 1
+
+
+def _font_dirs_to_native(font_dirs: Sequence[str | PathLike[str]] | None) -> list[str] | None:
+    """`font_dirs`를 native 호출용 문자열 목록으로 바꿉니다.
+
+    존재하지 않는 경로를 조용히 무시하면 폰트가 적용되지 않은 PDF가 만들어져 원인을 찾기
+    어려우므로, 폴더가 아닌 경로는 여기서 바로 거절합니다.
+    """
+    if font_dirs is None:
+        return None
+    if isinstance(font_dirs, (str, PathLike)):
+        raise TypeError("font_dirs must be a sequence of paths, not a single path")
+
+    directories: list[str] = []
+    for entry in font_dirs:
+        directory = Path(entry)
+        if not directory.exists():
+            raise FileNotFoundError(directory)
+        if not directory.is_dir():
+            raise NotADirectoryError(directory)
+        directories.append(str(directory))
+
+    return directories
 
 
 def _pages_to_native(pages: range | None) -> tuple[int, int] | None:
@@ -61,6 +85,7 @@ def to_pdf_bytes(
     *,
     page_index: int | None = None,
     omit_header_footer: bool = False,
+    font_dirs: Sequence[str | PathLike[str]] | None = None,
 ) -> bytes:
     """HWP 문서 bytes를 PDF bytes로 변환합니다.
 
@@ -71,15 +96,24 @@ def to_pdf_bytes(
     렌더링을 보존하며, 페이지 layout이나 `page_index` 의미는 바꾸지
     않습니다.
 
+    문서의 폰트가 시스템에 없으면 `font_dirs`의 폰트, 그다음 패키지에 내장된 한글
+    대체 폰트(Noto Sans KR)가 쓰여 한글이 빈 상자로 깨지지 않습니다. 시스템에 폰트가
+    있으면 그 폰트가 먼저 쓰입니다. 내장 폰트는 한글만 갖추고 있어 한자, 원문자(①),
+    전각 기호와 한컴 전용 기호는 시스템 폰트나 `font_dirs`가 있어야 표시됩니다.
+
     Args:
         data: 전체 HWP 문서 bytes.
         page_index: 변환할 zero-based 페이지 번호입니다. `None`이면 전체 문서를 변환합니다.
         omit_header_footer: 렌더링된 페이지에서 HWP 머리말/꼬리말 content를 생략할지 여부입니다.
+        font_dirs: 시스템 폰트에 더해 폰트를 찾을 폴더 목록입니다. 단일 경로가 아니라 경로의 시퀀스여야 합니다.
 
     Returns:
         `%PDF-`로 시작하는 PDF 문서 bytes입니다.
 
     Raises:
+        TypeError: `font_dirs`가 단일 경로일 때 발생합니다.
+        FileNotFoundError: `font_dirs`의 경로가 없을 때 발생합니다.
+        NotADirectoryError: `font_dirs`의 경로가 폴더가 아닐 때 발생합니다.
         ValueError: `page_index`가 음수이거나 문서 범위를 벗어날 때 발생합니다.
         HwpIngestError: 파싱, 렌더링, 또는 PDF backend 실행이 실패할 때 발생합니다.
     """
@@ -87,6 +121,7 @@ def to_pdf_bytes(
         data,
         _validate_page_index(page_index),
         omit_header_footer,
+        _font_dirs_to_native(font_dirs),
     )
 
 
@@ -130,6 +165,7 @@ def to_pdf_file(
     page_index: int | None = None,
     overwrite: bool = False,
     omit_header_footer: bool = False,
+    font_dirs: Sequence[str | PathLike[str]] | None = None,
 ) -> Path:
     """HWP 파일을 PDF 파일로 변환합니다.
 
@@ -141,19 +177,25 @@ def to_pdf_file(
     렌더링을 보존하며, 페이지 layout이나 `page_index` 의미는 바꾸지
     않습니다.
 
+    폰트 처리는 `to_pdf_bytes`와 같습니다. 문서의 폰트가 시스템에 없으면 `font_dirs`의
+    폰트, 그다음 내장 한글 대체 폰트가 쓰입니다.
+
     Args:
         input_path: 입력 HWP 파일 경로입니다.
         output_path: 출력 PDF 파일 경로입니다. `None`이면 입력 suffix를 `.pdf`로 바꿉니다.
         page_index: 변환할 zero-based 페이지 번호입니다. `None`이면 전체 문서를 변환합니다.
         overwrite: 기존 출력 파일을 대체할지 여부입니다.
         omit_header_footer: 렌더링된 페이지에서 HWP 머리말/꼬리말 content를 생략할지 여부입니다.
+        font_dirs: 시스템 폰트에 더해 폰트를 찾을 폴더 목록입니다. 단일 경로가 아니라 경로의 시퀀스여야 합니다.
 
     Returns:
         생성된 PDF 파일 경로입니다.
 
     Raises:
         FileExistsError: 출력 파일이 있고 `overwrite`가 `False`일 때 발생합니다.
-        FileNotFoundError: 입력 파일이 없을 때 발생합니다.
+        FileNotFoundError: 입력 파일이나 `font_dirs`의 경로가 없을 때 발생합니다.
+        NotADirectoryError: `font_dirs`의 경로가 폴더가 아닐 때 발생합니다.
+        TypeError: `font_dirs`가 단일 경로일 때 발생합니다.
         ValueError: `page_index`가 음수이거나 문서 범위를 벗어날 때 발생합니다.
         HwpIngestError: 파일 I/O, 파싱, 렌더링, PDF backend 실행, 또는 출력 쓰기가 실패할 때 발생합니다.
     """
@@ -168,6 +210,7 @@ def to_pdf_file(
         str(output_file),
         _validate_page_index(page_index),
         omit_header_footer,
+        _font_dirs_to_native(font_dirs),
     )
     return Path(report.output_path)
 

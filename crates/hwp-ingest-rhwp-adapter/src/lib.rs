@@ -6,7 +6,10 @@ pub mod text;
 
 pub use layout::DocumentLayoutInfo;
 pub use parse::{analyze_hwp_bytes, parse_hwp_bytes};
-pub use render::{RenderOptions, SvgPage, hwp_to_pdf_bytes, hwp_to_svg_pages};
+pub use pdf_backend::PdfFontOptions;
+pub use render::{
+    RenderOptions, SvgPage, hwp_to_pdf_bytes, hwp_to_pdf_bytes_with_fonts, hwp_to_svg_pages,
+};
 
 use std::error::Error;
 use std::fmt;

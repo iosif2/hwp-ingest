@@ -1,9 +1,9 @@
 use std::io::ErrorKind;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use hwp_ingest::{
-    self as core, ConvertOptions, DocumentStatus, HwpIngestError as CoreError, PageSelection,
-    PageStatus, TextOptions,
+    self as core, ConvertOptions, DocumentStatus, FontOptions, HwpIngestError as CoreError,
+    PageSelection, PageStatus, TextOptions,
 };
 use pyo3::create_exception;
 use pyo3::exceptions::{PyFileExistsError, PyFileNotFoundError, PyValueError};
@@ -110,6 +110,16 @@ impl TextExtraction {
     }
 }
 
+fn font_options(font_dirs: Option<Vec<String>>) -> FontOptions {
+    FontOptions {
+        font_dirs: font_dirs
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from)
+            .collect(),
+    }
+}
+
 fn convert_options(page_index: Option<u32>, omit_header_footer: bool) -> ConvertOptions {
     ConvertOptions {
         page_index,
@@ -148,15 +158,20 @@ fn analyze_hwp_bytes(data: &[u8]) -> PyResult<DocumentInfo> {
 
 /// Convert HWP bytes to PDF bytes.
 #[pyfunction]
-#[pyo3(signature = (data, page_index=None, omit_header_footer=false))]
+#[pyo3(signature = (data, page_index=None, omit_header_footer=false, font_dirs=None))]
 fn hwp_to_pdf_bytes(
     py: Python<'_>,
     data: &[u8],
     page_index: Option<u32>,
     omit_header_footer: bool,
+    font_dirs: Option<Vec<String>>,
 ) -> PyResult<Py<PyBytes>> {
-    let pdf = core::hwp_to_pdf_bytes(data, convert_options(page_index, omit_header_footer))
-        .map_err(core_error_to_py)?;
+    let pdf = core::hwp_to_pdf_bytes_with_fonts(
+        data,
+        convert_options(page_index, omit_header_footer),
+        &font_options(font_dirs),
+    )
+    .map_err(core_error_to_py)?;
 
     Ok(PyBytes::new(py, &pdf).unbind())
 }
@@ -183,17 +198,19 @@ fn hwp_to_svg_pages(
 
 /// Convert an HWP file to a PDF file and return a conversion report.
 #[pyfunction]
-#[pyo3(signature = (input_path, output_path, page_index=None, omit_header_footer=false))]
+#[pyo3(signature = (input_path, output_path, page_index=None, omit_header_footer=false, font_dirs=None))]
 fn hwp_to_pdf_file(
     input_path: &str,
     output_path: &str,
     page_index: Option<u32>,
     omit_header_footer: bool,
+    font_dirs: Option<Vec<String>>,
 ) -> PyResult<ConvertReport> {
-    let report = core::hwp_file_to_pdf_file(
+    let report = core::hwp_file_to_pdf_file_with_fonts(
         input_path,
         output_path,
         convert_options(page_index, omit_header_footer),
+        &font_options(font_dirs),
     )
     .map_err(core_error_to_py)?;
 

@@ -1,4 +1,5 @@
-use crate::{RhwpAdapterError, parse_hwp_bytes, pdf_backend};
+use crate::pdf_backend::{self, PdfFontOptions};
+use crate::{RhwpAdapterError, parse_hwp_bytes};
 use rhwp::renderer::compat::RenderCompatibilityOptions;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,9 +58,19 @@ pub fn hwp_to_svg_pages(
 }
 
 pub fn hwp_to_pdf_bytes(data: &[u8], options: RenderOptions) -> Result<Vec<u8>, RhwpAdapterError> {
+    hwp_to_pdf_bytes_with_fonts(data, options, &PdfFontOptions::default())
+}
+
+/// Like [`hwp_to_pdf_bytes`], with extra font directories for the PDF backend. The embedded
+/// fallback font is always available behind the system fonts and these directories.
+pub fn hwp_to_pdf_bytes_with_fonts(
+    data: &[u8],
+    options: RenderOptions,
+    fonts: &PdfFontOptions,
+) -> Result<Vec<u8>, RhwpAdapterError> {
     let svg_pages = hwp_to_svg_pages(data, options)?;
     let svg_documents: Vec<String> = svg_pages.into_iter().map(|page| page.svg).collect();
-    pdf_backend::svgs_to_pdf(&svg_documents)
+    pdf_backend::svgs_to_pdf(&svg_documents, fonts)
 }
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
 use std::io::ErrorKind;
 
 use hwp_ingest::{
-    ConvertOptions, HwpIngestError, analyze_hwp_bytes, hwp_file_to_svg_files, hwp_to_pdf_bytes,
-    hwp_to_svg_pages,
+    ConvertOptions, FontOptions, HwpIngestError, analyze_hwp_bytes,
+    hwp_file_to_pdf_file_with_fonts, hwp_file_to_svg_files, hwp_to_pdf_bytes,
+    hwp_to_pdf_bytes_with_fonts, hwp_to_svg_pages,
 };
 
 fn fixture_bytes() -> Vec<u8> {
@@ -69,6 +70,60 @@ fn single_page_conversion_returns_pdf_bytes() {
     .expect("fixture page should render");
 
     assert!(pdf.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn font_options_default_to_no_extra_directories() {
+    assert!(FontOptions::default().font_dirs.is_empty());
+}
+
+#[test]
+fn pdf_with_fonts_converts_with_and_without_extra_font_directories() {
+    let data = fixture_bytes();
+    let font_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../hwp-ingest-rhwp-adapter/assets/fonts");
+
+    let plain =
+        hwp_to_pdf_bytes_with_fonts(&data, ConvertOptions::default(), &FontOptions::default())
+            .expect("default fonts should render");
+    let with_dir = hwp_to_pdf_bytes_with_fonts(
+        &data,
+        ConvertOptions::default(),
+        &FontOptions {
+            font_dirs: vec![font_dir],
+        },
+    )
+    .expect("an extra font directory should render");
+
+    assert!(plain.starts_with(b"%PDF-"));
+    assert!(with_dir.starts_with(b"%PDF-"));
+    // The original API keeps working and goes through the same path as the default fonts.
+    let original = hwp_to_pdf_bytes(&data, ConvertOptions::default()).expect("should render");
+    assert!(original.starts_with(b"%PDF-"));
+}
+
+#[test]
+fn pdf_file_with_fonts_writes_a_pdf_and_reports_pages() {
+    let output_dir = temp_svg_dir("pdf-fonts");
+    std::fs::create_dir_all(&output_dir).expect("output directory should be created");
+    let output = output_dir.join("out.pdf");
+
+    let report = hwp_file_to_pdf_file_with_fonts(
+        fixture_path(),
+        &output,
+        ConvertOptions::default(),
+        &FontOptions::default(),
+    )
+    .expect("PDF file should be written");
+
+    assert_eq!(report.output_path, output);
+    assert_eq!(report.page_count, 1);
+    assert!(
+        std::fs::read(&output)
+            .expect("PDF should exist")
+            .starts_with(b"%PDF-")
+    );
+    let _ = std::fs::remove_dir_all(output_dir);
 }
 
 #[test]

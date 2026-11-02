@@ -168,6 +168,7 @@ def hwp_to_pdf_bytes(
     data: bytes,
     page_index: int | None = None,
     omit_header_footer: bool = False,
+    font_dirs: list[str] | None = None,
 ) -> bytes:
     """Convert HWP document bytes into PDF bytes."""
     ...
@@ -187,6 +188,7 @@ def hwp_to_pdf_file(
     output_path: str,
     page_index: int | None = None,
     omit_header_footer: bool = False,
+    font_dirs: list[str] | None = None,
 ) -> ConvertReport:
     """Convert an HWP file into a PDF file."""
     ...

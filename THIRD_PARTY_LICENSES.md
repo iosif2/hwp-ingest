@@ -276,3 +276,11 @@ The upstream rhwp v0.8.7 notice above does not list the following direct Rust de
 | rand_core | 0.10.1 | MIT OR Apache-2.0 | rust-random/rand_core |
 | rustybuzz | 0.20.1 | MIT | harfbuzz/rustybuzz |
 | zeroize | 1.9.1 | Apache-2.0 OR MIT | RustCrypto/utils |
+
+## Bundled font
+
+hwp-ingest embeds one font, used as the last-resort fallback when a PDF is rendered on a system without a Korean-capable font. Hancom and Microsoft fonts are not bundled.
+
+| Font | License | Copyright | Source | Used for |
+|------|---------|-----------|--------|----------|
+| Noto Sans KR Regular (subset: Hangul, Latin, bullets and shapes), 2,519,996 bytes | SIL Open Font License 1.1 (`licenses/NotoSansKR-OFL.txt`) | Copyright 2014-2021 Adobe | `edwardkim/rhwp` v0.8.7, `ttfs/opensource/NotoSansKR-Regular.ttf`, unchanged | Fallback Hangul glyphs in PDF output; details in `crates/hwp-ingest-rhwp-adapter/assets/fonts/README.md` |

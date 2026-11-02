@@ -1067,6 +1067,7 @@ name = "hwp-ingest-rhwp-adapter"
 version = "0.1.2"
 dependencies = [
  "rhwp",
+ "sha2",
 ]
 
 [[package]]
