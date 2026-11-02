@@ -30,7 +30,7 @@ Issues = "https://github.com/iosif2/hwp-ingest/issues"
 [dependency-groups]
 dev = [
     "maturin>=1.11,<2",
-    "pytest>=8,<9",
+    "pytest>=8,<10",
 ]
 
 [tool.maturin]
